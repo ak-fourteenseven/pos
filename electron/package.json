@@ -1,0 +1,16 @@
+{
+  "name": "pos-desktop",
+  "version": "1.0.0",
+  "description": "祥興茶餐廳 POS 桌面應用",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "concurrently \"cd ../socket-server && npm start\" \"cd ../frontend && npm run dev\" \"electron .\""
+  },
+  "dependencies": {
+    "electron": "^33.2.1"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  }
+}

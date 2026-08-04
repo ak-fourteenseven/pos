@@ -1,0 +1,14 @@
+{
+  "name": "pos-socket-server",
+  "version": "1.0.0",
+  "description": "茶餐廳 POS 即時通訊服務 - KDS 推送與局域網同步",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "socket.io": "^4.7.5",
+    "socket.io-client": "^4.7.5"
+  }
+}
