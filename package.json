@@ -1,0 +1,17 @@
+{
+  "name": "pos-dev",
+  "version": "1.0.0",
+  "private": true,
+  "description": "餐飲店本地 POS 系統（本地 SQLite + Vue 3 收銀前端）",
+  "scripts": {
+    "setup": "npm --prefix server install && npm --prefix client install",
+    "dev": "concurrently -n server,client -c blue,green \"npm:server\" \"npm:client\"",
+    "server": "npm --prefix server run dev",
+    "client": "npm --prefix client run dev",
+    "build": "npm --prefix client run build",
+    "start": "npm --prefix server start"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}
