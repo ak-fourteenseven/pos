@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { api } from '../api';
 import { useAuthStore } from '../stores/auth';
@@ -7,9 +7,12 @@ import { useCatalogStore } from '../stores/catalog';
 import { usePosStore } from '../stores/pos';
 import { useToastStore } from '../stores/toast';
 import Modal from '../components/Modal.vue';
+import ComboWizard from '../components/ComboWizard.vue';
+import DrinkModal from '../components/DrinkModal.vue';
 import {
   fmtMoney, fmtTime, hexA, PAYMENT_META, ORDER_STATUS, QUICK_REMARKS, today,
 } from '../utils/format';
+import { currentSlot, modifiersSum, slotRuleText } from '../utils/pricing';
 
 const auth = useAuthStore();
 const catalog = useCatalogStore();
@@ -17,12 +20,18 @@ const pos = usePosStore();
 const toast = useToastStore();
 const router = useRouter();
 
-/* ---------------- 菜品區 ---------------- */
+/* ---------------- 菜品區（套餐菜單） ---------------- */
 const activeCategory = ref('all');
 const keyword = ref('');
 
+const menuProducts = computed(() => {
+  const list = [];
+  for (const c of catalog.menu.categories) for (const p of c.products) list.push(p);
+  return list;
+});
+
 const products = computed(() => {
-  let list = catalog.availableProducts;
+  let list = menuProducts.value;
   if (activeCategory.value !== 'all') {
     list = list.filter((p) => p.category_id === activeCategory.value);
   }
@@ -30,6 +39,14 @@ const products = computed(() => {
   if (kw) list = list.filter((p) => p.name.includes(kw));
   return list;
 });
+
+/* ---------------- 時段（飲品計價） ---------------- */
+const nowSlot = ref(currentSlot(catalog.timeSlots));
+let slotTimer = null;
+onMounted(() => {
+  slotTimer = setInterval(() => { nowSlot.value = currentSlot(catalog.timeSlots); }, 10000);
+});
+onUnmounted(() => clearInterval(slotTimer));
 
 /* ---------------- 彈窗狀態 ---------------- */
 const specModal = ref(false);
@@ -46,6 +63,9 @@ const ordersDetail = ref(null);
 const moveModal = ref(false);
 const receipt = ref(null);
 const voidModal = ref(false);
+const wizardProduct = ref(null);
+const drinkProduct = ref(null);
+const receiptTab = ref('customer');
 
 /* ---------------- 初始化 ---------------- */
 onMounted(async () => {
@@ -67,13 +87,47 @@ function onProduct(p) {
     toast.error(`「${p.name}」已售罄`);
     return;
   }
-  const specs = catalog.parseSpecs(p);
-  if (specs.length) {
-    specForm.value = { product: p, qty: 1, spec: specs[0].name, remark: '', editing: null };
-    specModal.value = true;
-  } else {
-    pos.addProduct(p);
+  // 套餐（湯底/湯餃/需口味的小食）→ 嚮導
+  if (p.steps && p.steps.length) {
+    wizardProduct.value = p;
+    return;
   }
+  // 飲品 → 凍熱/口味彈窗
+  if (Number(p.is_drink) === 1) {
+    drinkProduct.value = p;
+    return;
+  }
+  pos.addProduct(p);
+}
+
+/** 套餐選項明細文字（購物車/小票共用） */
+function optionLines(item) {
+  let o = item.options;
+  if (!o) return [];
+  if (typeof o === 'string') { try { o = JSON.parse(o); } catch { return []; } }
+  const lines = [];
+  if (o.noodle) lines.push(`麵: ${o.noodle.name}`);
+  if (o.spiciness) lines.push(`辣度: ${o.spiciness.name}`);
+  if (o.filling) lines.push(`餡料: ${o.filling.name}`);
+  if (o.flavor) lines.push(`口味: ${o.flavor.name}`);
+  if (o.toppings && o.toppings.length) lines.push(`加料: ${o.toppings.map((t) => t.name).join('、')}`);
+  if (o.drink) {
+    const t = o.drink.temperature === 'HOT' ? '熱' : '凍';
+    const prefs = o.drink.preferences && o.drink.preferences.length ? `, ${o.drink.preferences.join('、')}` : '';
+    const price = Number(o.drink.final_price) === 0 ? '免費' : fmtMoney(o.drink.final_price, catalog.currency);
+    lines.push(`飲品: ${o.drink.name}(${t}${prefs}) ${price}`);
+  }
+  return lines;
+}
+
+function onWizardAdd({ product, options, qty }) {
+  const unit = Number(product.price) + modifiersSum(options) + (options.drink ? Number(options.drink.final_price) || 0 : 0);
+  pos.addCombo(product, options, unit, qty);
+  wizardProduct.value = null;
+}
+function onDrinkAdd({ product, temperature, preferences, qty }) {
+  pos.addDrink(product, { temperature, preferences }, qty);
+  drinkProduct.value = null;
 }
 
 function specDiff() {
@@ -253,7 +307,52 @@ async function voidOrder() {
 
 function afterReceipt() {
   receipt.value = null;
+  receiptTab.value = 'customer';
 }
+
+/** 飲品時段優惠金額（顧客單顯示：原價 $X，優惠 −$Y） */
+function drinkSaving(it) {
+  let o = it.options;
+  if (!o) return null;
+  if (typeof o === 'string') { try { o = JSON.parse(o); } catch { return null; } }
+  if (!o.drink || !o.drink.base_price) return null;
+  const saved = Number(o.drink.base_price) - Number(o.drink.final_price || 0);
+  if (saved <= 0) return null;
+  return { base: Number(o.drink.base_price), saved };
+}
+
+/** 廚房單文字（後廚 + 水吧分區） */
+const kitchenText = computed(() => {
+  if (!receipt.value) return '';
+  const food = [];
+  const bar = [];
+  const drinkLine = (it, d) => {
+    const t = d.temperature === 'HOT' ? '熱' : '凍';
+    const prefs = d.preferences && d.preferences.length ? `, ${d.preferences.join(', ')}` : '';
+    bar.push(`${it.quantity}x ${d.name} (${t}${prefs})`);
+  };
+  for (const it of receipt.value.items) {
+    let o = it.options;
+    if (typeof o === 'string') { try { o = JSON.parse(o); } catch { o = null; } }
+    if (o && o.drink && Number(o.drink.product_id) === Number(it.product_id) && !o.base) {
+      drinkLine(it, o.drink); // 獨立飲品
+    } else if (o && o.base) {
+      food.push(`${it.quantity}x ${o.base}`);
+      if (o.noodle) food.push(`     麵: ${o.noodle.name}`);
+      if (o.spiciness) food.push(`     辣度: ${o.spiciness.name}`);
+      if (o.filling) food.push(`     餡料: ${o.filling.name}`);
+      if (o.flavor) food.push(`     口味: ${o.flavor.name}`);
+      if (o.toppings && o.toppings.length) food.push(`     加料: ${o.toppings.map((x) => x.name).join(', ')}`);
+      if (o.drink) drinkLine(it, o.drink); // 套餐內飲品同步給水吧
+    } else {
+      food.push(`${it.quantity}x ${it.product_name}${it.spec ? ` [${it.spec}]` : ''}${it.remark ? ` (${it.remark})` : ''}`);
+    }
+  }
+  const lines = [];
+  if (food.length) { lines.push('【廚房】', ...food); }
+  if (bar.length) { lines.push('', '【水吧】', ...bar); }
+  return lines.join('\n');
+});
 
 function paymentMeta(m) {
   return PAYMENT_META[m] || { label: m, icon: '💰' };
@@ -278,6 +377,7 @@ const cashShort = computed(() => pos.paymentMethod === 'cash' && pos.received > 
         <button v-if="pos.isTableMode" class="btn-ghost btn-sm" @click="moveModal = true">換桌</button>
         <button v-if="pos.isTableMode && auth.isManager" class="btn-ghost btn-sm !text-red-500" @click="voidModal = true">作廢</button>
         <div class="flex-1" />
+        <span class="chip bg-amber-100 text-amber-700">🕐 {{ slotRuleText(nowSlot) }}</span>
         <span v-if="catalog.serviceRate > 0" class="chip bg-amber-100 text-amber-700">服務費 {{ catalog.serviceRate }}%</span>
       </div>
 
@@ -291,13 +391,13 @@ const cashShort = computed(() => pos.paymentMethod === 'cash' && pos.received > 
           全部
         </button>
         <button
-          v-for="c in catalog.categories"
+          v-for="c in catalog.menu.categories"
           :key="c.id"
           class="btn btn-sm shrink-0"
           :class="activeCategory === c.id ? 'bg-brand-500 text-white' : 'bg-gray-100 text-gray-600'"
           @click="activeCategory = c.id"
         >
-          {{ c.name }}（{{ c.product_count }}）
+          {{ c.name }}（{{ c.products.length }}）
         </button>
         <div class="flex-1" />
         <input v-model="keyword" class="input !w-44 !py-1" placeholder="搜尋菜品…" />
@@ -320,7 +420,9 @@ const cashShort = computed(() => pos.paymentMethod === 'cash' && pos.received > 
             <div class="mt-2 font-bold text-gray-800 truncate">{{ p.name }}</div>
             <div class="flex items-center justify-between mt-0.5">
               <span class="font-extrabold" :style="{ color: p.color }">{{ fmtMoney(p.price, catalog.currency) }}</span>
-              <span v-if="p.specs" class="chip bg-white/70 text-gray-500 text-[10px]">規格</span>
+              <span v-if="p.kind === 'combo'" class="chip bg-brand-100 text-brand-700 text-[10px]">套餐</span>
+              <span v-else-if="Number(p.is_drink) === 1" class="chip bg-sky-100 text-sky-700 text-[10px]">飲品</span>
+              <span v-else-if="p.steps && p.steps.length" class="chip bg-violet-100 text-violet-700 text-[10px]">選口味</span>
             </div>
             <div v-if="Number(p.is_available) !== 1" class="absolute inset-0 bg-white/70 rounded-2xl flex items-center justify-center font-extrabold text-gray-400">
               售罄
@@ -350,7 +452,11 @@ const cashShort = computed(() => pos.paymentMethod === 'cash' && pos.received > 
           class="px-4 py-3 border-b border-gray-50 flex gap-3 items-start"
         >
           <div class="flex-1 min-w-0">
-            <div class="font-bold text-sm text-gray-800 truncate">{{ item.name }}</div>
+            <div class="font-bold text-sm text-gray-800 truncate">
+              {{ item.name }}
+              <span v-if="item.item_type === 'combo'" class="chip bg-brand-100 text-brand-700 text-[10px] ml-1">套餐</span>
+            </div>
+            <div v-for="(line, i) in optionLines(item)" :key="i" class="text-xs text-gray-400 mt-0.5 truncate">{{ line }}</div>
             <div v-if="item.spec || item.remark" class="text-xs text-gray-400 mt-0.5 truncate">
               <span v-if="item.spec">[{{ item.spec }}]</span> {{ item.remark }}
             </div>
@@ -590,9 +696,12 @@ const cashShort = computed(() => pos.paymentMethod === 'cash' && pos.received > 
             <span class="font-extrabold text-brand-600">{{ fmtMoney(o.pay_amount || o.total_amount, catalog.currency) }}</span>
           </button>
           <div v-if="ordersDetail && ordersDetail.id === o.id" class="border-t border-gray-100 bg-gray-50 px-4 py-3 space-y-2">
-            <div v-for="it in ordersDetail.items" :key="it.id" class="flex justify-between text-sm">
-              <span>{{ it.product_name }}<span v-if="it.spec">[{{ it.spec }}]</span> ×{{ it.quantity }}<span v-if="it.remark" class="text-gray-400">（{{ it.remark }}）</span></span>
-              <span class="text-gray-500">{{ fmtMoney(it.price * it.quantity, catalog.currency) }}</span>
+            <div v-for="it in ordersDetail.items" :key="it.id" class="text-sm">
+              <div class="flex justify-between">
+                <span>{{ it.product_name }}<span v-if="it.spec">[{{ it.spec }}]</span> ×{{ it.quantity }}<span v-if="it.remark" class="text-gray-400">（{{ it.remark }}）</span></span>
+                <span class="text-gray-500">{{ fmtMoney(it.price * it.quantity, catalog.currency) }}</span>
+              </div>
+              <div v-for="(line, i) in optionLines(it)" :key="i" class="text-xs text-gray-400 pl-2">{{ line }}</div>
             </div>
             <div class="flex justify-between text-sm pt-1 border-t border-gray-200">
               <span class="text-gray-500">支付：{{ paymentMeta(ordersDetail.payment_method).label || '—' }}</span>
@@ -637,38 +746,79 @@ const cashShort = computed(() => pos.paymentMethod === 'cash' && pos.received > 
       </template>
     </Modal>
 
-    <!-- ============ 結帳小票 ============ -->
+    <!-- ============ 結帳小票（顧客收銀單 / 廚房單） ============ -->
     <Modal v-model="receipt" title="結帳完成" width="max-w-sm">
       <template v-if="receipt">
-        <div class="text-center space-y-1 pb-3 border-b border-dashed border-gray-200">
-          <div class="font-extrabold text-lg">{{ catalog.settings.store_name }}</div>
-          <div class="text-xs text-gray-400">{{ receipt.order_no }} · {{ receipt.created_at }}</div>
-          <div v-if="receipt.table_number" class="text-xs text-gray-400">桌台 {{ receipt.table_number }}</div>
+        <div class="flex gap-2 mb-3">
+          <button class="btn btn-sm flex-1" :class="receiptTab === 'customer' ? 'bg-brand-500 text-white' : 'bg-gray-100 text-gray-600'" @click="receiptTab = 'customer'">顧客收銀單</button>
+          <button class="btn btn-sm flex-1" :class="receiptTab === 'kitchen' ? 'bg-brand-500 text-white' : 'bg-gray-100 text-gray-600'" @click="receiptTab = 'kitchen'">廚房單（後廚/水吧）</button>
         </div>
-        <div class="py-3 space-y-1.5 text-sm border-b border-dashed border-gray-200">
-          <div v-for="it in receipt.items" :key="it.id" class="flex justify-between">
-            <span class="truncate mr-2">{{ it.product_name }}<span v-if="it.spec">[{{ it.spec }}]</span> ×{{ it.quantity }}</span>
-            <span class="shrink-0">{{ fmtMoney(it.price * it.quantity, catalog.currency) }}</span>
+
+        <!-- 顧客收銀單 -->
+        <div v-if="receiptTab === 'customer'">
+          <div class="text-center space-y-1 pb-3 border-b border-dashed border-gray-200">
+            <div class="font-extrabold text-lg">{{ catalog.settings.store_name }}</div>
+            <div class="text-xs text-gray-400">{{ receipt.order_no }} · {{ receipt.created_at }}</div>
+            <div v-if="receipt.table_number" class="text-xs text-gray-400">桌台 {{ receipt.table_number }}</div>
+          </div>
+          <div class="py-3 space-y-2 text-sm border-b border-dashed border-gray-200">
+            <div v-for="it in receipt.items" :key="it.id">
+              <div class="flex justify-between">
+                <span class="truncate mr-2">{{ it.product_name }}<span v-if="it.spec">[{{ it.spec }}]</span> ×{{ it.quantity }}</span>
+                <span class="shrink-0">{{ fmtMoney(it.price * it.quantity, catalog.currency) }}</span>
+              </div>
+              <div v-for="(line, i) in optionLines(it)" :key="i" class="text-xs text-gray-400 pl-2">{{ line }}</div>
+              <div v-if="drinkSaving(it)" class="text-xs text-emerald-500 pl-2">飲品時段優惠：原價 {{ fmtMoney(drinkSaving(it).base, catalog.currency) }}，優惠 −{{ fmtMoney(drinkSaving(it).saved, catalog.currency) }}</div>
+            </div>
+          </div>
+          <div class="py-3 space-y-1.5 text-sm">
+            <div class="flex justify-between text-gray-500"><span>小計</span><span>{{ fmtMoney(receipt.total_amount, catalog.currency) }}</span></div>
+            <div v-if="receipt.discount_amount" class="flex justify-between text-gray-500"><span>折扣</span><span>−{{ fmtMoney(receipt.discount_amount, catalog.currency) }}</span></div>
+            <div v-if="receipt.service_fee" class="flex justify-between text-gray-500"><span>服務費</span><span>{{ fmtMoney(receipt.service_fee, catalog.currency) }}</span></div>
+            <div class="flex justify-between font-extrabold"><span>實收</span><span class="text-brand-600">{{ fmtMoney(receipt.pay_amount, catalog.currency) }}</span></div>
+            <div class="flex justify-between text-gray-500"><span>支付方式</span><span>{{ paymentMeta(receipt.payment_method).label }}</span></div>
+            <div v-if="receipt.payment_method === 'cash'" class="flex justify-between text-gray-500">
+              <span>收現 / 找零</span>
+              <span>{{ fmtMoney(receipt.received_amount, catalog.currency) }} / {{ fmtMoney(receipt.change_amount, catalog.currency) }}</span>
+            </div>
+          </div>
+          <div class="text-center text-xs text-gray-400 pt-2 border-t border-dashed border-gray-200">
+            {{ catalog.settings.receipt_footer }}
           </div>
         </div>
-        <div class="py-3 space-y-1.5 text-sm">
-          <div class="flex justify-between text-gray-500"><span>小計</span><span>{{ fmtMoney(receipt.total_amount, catalog.currency) }}</span></div>
-          <div v-if="receipt.discount_amount" class="flex justify-between text-gray-500"><span>折扣</span><span>−{{ fmtMoney(receipt.discount_amount, catalog.currency) }}</span></div>
-          <div v-if="receipt.service_fee" class="flex justify-between text-gray-500"><span>服務費</span><span>{{ fmtMoney(receipt.service_fee, catalog.currency) }}</span></div>
-          <div class="flex justify-between font-extrabold"><span>實收</span><span class="text-brand-600">{{ fmtMoney(receipt.pay_amount, catalog.currency) }}</span></div>
-          <div class="flex justify-between text-gray-500"><span>支付方式</span><span>{{ paymentMeta(receipt.payment_method).label }}</span></div>
-          <div v-if="receipt.payment_method === 'cash'" class="flex justify-between text-gray-500">
-            <span>收現 / 找零</span>
-            <span>{{ fmtMoney(receipt.received_amount, catalog.currency) }} / {{ fmtMoney(receipt.change_amount, catalog.currency) }}</span>
+
+        <!-- 廚房單 -->
+        <div v-else>
+          <div class="text-center space-y-1 pb-3 border-b border-dashed border-gray-200">
+            <div class="font-extrabold">【廚房單】</div>
+            <div class="text-xs text-gray-400">{{ receipt.order_no }}<span v-if="receipt.table_number"> · 桌台 {{ receipt.table_number }}</span> · {{ receipt.created_at }}</div>
           </div>
-        </div>
-        <div class="text-center text-xs text-gray-400 pt-2 border-t border-dashed border-gray-200">
-          {{ catalog.settings.receipt_footer }}
+          <pre class="py-3 text-sm font-mono whitespace-pre-wrap leading-relaxed border-b border-dashed border-gray-200">{{ kitchenText }}</pre>
+          <p class="text-xs text-gray-400 pt-2">實際硬體列印需在桌面殼（Tauri/Electron）接入 ESC/POS 印表機；此處為列印內容預覽。</p>
         </div>
       </template>
       <template #footer>
         <button class="btn-primary" @click="afterReceipt">完成</button>
       </template>
     </Modal>
+
+    <!-- ============ 套餐嚮導 ============ -->
+    <ComboWizard
+      v-model="wizardProduct"
+      :product="wizardProduct"
+      :drinks="catalog.menu.drinks"
+      :slot="nowSlot"
+      :currency="catalog.currency"
+      @add="onWizardAdd"
+    />
+
+    <!-- ============ 獨立飲品 ============ -->
+    <DrinkModal
+      v-model="drinkProduct"
+      :product="drinkProduct"
+      :slot="nowSlot"
+      :currency="catalog.currency"
+      @add="onDrinkAdd"
+    />
   </div>
 </template>

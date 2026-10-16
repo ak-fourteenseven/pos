@@ -60,6 +60,10 @@ export const usePosStore = defineStore('pos', {
       this.items = (order.items || []).map((it) => this.mapItem(it));
     },
     mapItem(it) {
+      let options = null;
+      try {
+        options = it.options ? (typeof it.options === 'string' ? JSON.parse(it.options) : it.options) : null;
+      } catch { options = null; }
       return {
         id: it.id,
         product_id: it.product_id,
@@ -68,8 +72,11 @@ export const usePosStore = defineStore('pos', {
         qty: Number(it.quantity),
         spec: it.spec || '',
         remark: it.remark || '',
+        item_type: it.item_type || 'simple',
+        options,
       };
     },
+    /** 一般單品（含舊版規格） */
     async addProduct(product, { spec = '', spec_diff = 0, remark = '', qty = 1 } = {}) {
       if (this.orderId) {
         const it = await api.post(`/orders/${this.orderId}/items`, {
@@ -85,6 +92,50 @@ export const usePosStore = defineStore('pos', {
           qty,
           spec,
           remark,
+        });
+      }
+    },
+    /** 套餐（向導結果）：unitPrice 為前端即時計算價，後端會覆核 */
+    async addCombo(product, options, unitPrice, qty = 1) {
+      if (this.orderId) {
+        const it = await api.post(`/orders/${this.orderId}/items`, {
+          product_id: product.id, quantity: qty, options,
+        });
+        this.items.push(this.mapItem(it));
+      } else {
+        this.items.push({
+          id: `t${++tempSeq}`,
+          product_id: product.id,
+          name: product.name,
+          price: Number(unitPrice),
+          qty,
+          spec: '',
+          remark: '',
+          item_type: 'combo',
+          options,
+        });
+      }
+    },
+    /** 獨立飲品：temperature HOT/COLD，preferences 口味標籤 */
+    async addDrink(product, { temperature, preferences = [] }, qty = 1) {
+      const options = { drink: { product_id: product.id, name: product.name, temperature, preferences } };
+      const tempLabel = temperature === 'HOT' ? '熱' : '凍';
+      if (this.orderId) {
+        const it = await api.post(`/orders/${this.orderId}/items`, {
+          product_id: product.id, quantity: qty, options, spec: tempLabel,
+        });
+        this.items.push(this.mapItem(it));
+      } else {
+        this.items.push({
+          id: `t${++tempSeq}`,
+          product_id: product.id,
+          name: product.name,
+          price: Number(product.price), // 後端結帳時依時段覆核
+          qty,
+          spec: tempLabel,
+          remark: preferences.join('、'),
+          item_type: 'simple',
+          options,
         });
       }
     },
@@ -129,11 +180,7 @@ export const usePosStore = defineStore('pos', {
       if (this.orderId) throw new Error('桌台訂單請直接結帳或作廢');
       const order = await api.post('/orders', {
         status: 'held',
-        items: this.items.map((i) => ({
-          product_id: i.product_id, quantity: i.qty, spec: i.spec,
-          spec_diff: i.price - (this.catalog.products.find((p) => p.id === i.product_id)?.price ?? i.price),
-          remark: i.remark,
-        })),
+        items: this.items.map((i) => this.itemPayload(i)),
       });
       this.reset();
       return order;
@@ -149,19 +196,35 @@ export const usePosStore = defineStore('pos', {
       await api.del(`/orders/${order.id}`);
       this.loadHeld();
     },
+    /** 組裝傳給後端的明細 payload（含套餐選項） */
+    itemPayload(i) {
+      const payload = {
+        product_id: i.product_id,
+        quantity: i.qty,
+        spec: i.spec || undefined,
+        remark: i.remark || undefined,
+      };
+      if (i.options) payload.options = i.options;
+      else if (i.spec_diff) payload.spec_diff = i.spec_diff;
+      return payload;
+    },
     /** 結帳：返回已結帳訂單 */
     async checkout() {
       if (!this.items.length) throw new Error('購物車為空');
       let orderId = this.orderId;
       if (!orderId) {
         const created = await api.post('/orders', {
-          items: this.items.map((i) => ({
-            product_id: i.product_id, quantity: i.qty, spec: i.spec,
-            spec_diff: i.price - (this.catalog.products.find((p) => p.id === i.product_id)?.price ?? i.price),
-            remark: i.remark,
-          })),
+          items: this.items.map((i) => this.itemPayload(i)),
         });
         orderId = created.id;
+        // 以後端覆核後的價格刷新購物車（飲品時段價等以前端展示為準可能不一致）
+        if (created.items && created.items.length) {
+          this.items = created.items.map((it) => this.mapItem(it));
+          this.orderId = orderId;
+        }
+      }
+      if (this.paymentMethod === 'cash' && Number(this.received || 0) < this.total) {
+        throw new Error(`收現金額不足（應收 ${this.total}）`);
       }
       const paid = await api.post(`/orders/${orderId}/pay`, {
         payment_method: this.paymentMethod,

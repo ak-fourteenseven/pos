@@ -35,8 +35,15 @@ function getSettings(db) {
 function genOrderNo(db) {
   const d = new Date();
   const ymd = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
-  const row = db.prepare('SELECT COUNT(*) AS c FROM orders WHERE order_no LIKE ?').get(`POS${ymd}-%`);
-  return `POS${ymd}-${String(row.c + 1).padStart(4, '0')}`;
+  // 取當日最大序號（避免掛單刪除/併桌後 COUNT 回滾造成單號重複）
+  const row = db.prepare('SELECT order_no FROM orders WHERE order_no LIKE ? ORDER BY id DESC LIMIT 1')
+    .get(`POS${ymd}-%`);
+  let seq = 0;
+  if (row) {
+    const m = String(row.order_no).match(/-(\d+)$/);
+    if (m) seq = Number(m[1]);
+  }
+  return `POS${ymd}-${String(seq + 1).padStart(4, '0')}`;
 }
 function recomputeOrderTotal(db, orderId) {
   const row = db.prepare('SELECT COALESCE(SUM(price * quantity), 0) AS s FROM order_items WHERE order_id = ?').get(orderId);
@@ -54,6 +61,62 @@ function freeTable(db, tableId, status = 'cleaning') {
 /** 清理臨時檔案：刪除失敗不影響業務回應 */
 function safeUnlink(file) {
   try { fs.unlinkSync(file); } catch { /* ignore */ }
+}
+
+/* ---------------- 飲品時段計價引擎 ---------------- */
+/** 根據當前時間找出所屬時段 */
+function currentTimeSlot(db, now = new Date()) {
+  const hm = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+  const slots = db.prepare('SELECT * FROM time_slots').all();
+  return slots.find((s) => hm >= s.start_time && hm < s.end_time) || null;
+}
+/**
+ * 計算飲品最終價格
+ * - 下午茶時段：冷熱全免
+ * - 午/晚市：熱飲免費；冷飲原價 + 冷飲加價
+ */
+function computeDrinkPrice(db, basePrice, temperature, now = new Date()) {
+  const base = Number(basePrice) || 0;
+  const slot = currentTimeSlot(db, now);
+  if (!slot) return { price: base, period: null, periodCode: null, saved: 0 };
+  const code = slot.code;
+  if (Number(slot.drink_all_free) === 1) return { price: 0, period: slot.name, periodCode: code, saved: base };
+  if (temperature === 'HOT' && Number(slot.drink_hot_free) === 1) return { price: 0, period: slot.name, periodCode: code, saved: base };
+  if (temperature === 'COLD') {
+    const extra = Number(slot.drink_cold_extra) || 0;
+    return { price: base + extra, period: slot.name, periodCode: code, saved: -extra };
+  }
+  return { price: base, period: slot.name, periodCode: code, saved: 0 };
+}
+/** 依套餐選項計算單品總價（後端覆核，防止前端被改價） */
+function computeComboUnitPrice(db, product, it) {
+  const rawOptions = it.options || null;
+  const options = rawOptions ? (typeof rawOptions === 'string' ? JSON.parse(rawOptions) : rawOptions) : null;
+  // 獨立飲品：品項本身即飲品時，單價 = 飲品時段價（不重複計基礎價）
+  const isSelfDrink = Number(product.is_drink) === 1 && options && options.drink
+    && Number(options.drink.product_id) === Number(product.id);
+  let unit = isSelfDrink ? 0 : Number(product.price) || 0;
+  if (!options) return { unit: unit + Number(it.spec_diff || 0), options: null };
+  for (const key of ['noodle', 'spiciness', 'filling', 'flavor']) {
+    if (options[key] && options[key].price_diff) unit += Number(options[key].price_diff) || 0;
+  }
+  for (const t of options.toppings || []) unit += Number(t.price_diff) || 0;
+  if (options.drink && options.drink.product_id) {
+    const dp = db.prepare('SELECT * FROM products WHERE id = ?').get(options.drink.product_id);
+    if (dp) {
+      const calc = computeDrinkPrice(db, Number(dp.price), options.drink.temperature || 'HOT');
+      options.drink = {
+        ...options.drink,
+        product_id: dp.id,
+        name: dp.name,
+        base_price: Number(dp.price),
+        final_price: calc.price,
+        period: calc.period,
+      };
+      unit += calc.price;
+    }
+  }
+  return { unit, options };
 }
 
 /* ================= 登入 / 員工 ================= */
@@ -167,6 +230,71 @@ app.delete('/api/products/:id', managerOnly, (req, res) => {
   const db = getDb();
   db.prepare('DELETE FROM products WHERE id = ?').run(req.params.id);
   ok(res, { deleted: true });
+});
+
+/* ================= 菜單（套餐樹 + 飲品） ================= */
+app.get('/api/menu', (req, res) => {
+  const db = getDb();
+  const cats = db.prepare('SELECT * FROM categories WHERE is_deleted = 0 ORDER BY sort_order, id').all();
+  const products = db.prepare('SELECT * FROM products WHERE is_available = 1 ORDER BY id').all();
+  const links = db.prepare('SELECT * FROM product_options ORDER BY step, id').all();
+  const groups = db.prepare('SELECT * FROM option_groups ORDER BY sort_order, id').all();
+  const items = db.prepare('SELECT * FROM option_items ORDER BY sort_order, id').all();
+  const groupMap = new Map(groups.map((g) => [g.id, { ...g, items: [] }]));
+  for (const it of items) {
+    const g = groupMap.get(it.group_id);
+    if (g) g.items.push(it);
+  }
+  const out = cats.map((c) => ({ ...c, products: [] }));
+  const catMap = new Map(out.map((c) => [c.id, c]));
+  const DRINK_GROUP = { id: 0, code: 'drink', name: '選擇飲品（跟餐）', is_multi: 0, items: [] };
+  for (const p of products) {
+    const steps = links
+      .filter((l) => l.product_id === p.id)
+      .map((l) => {
+        const g = l.group_id ? groupMap.get(l.group_id) : DRINK_GROUP;
+        return g ? { ...g, step: l.step, required: Number(l.required) } : null;
+      })
+      .filter(Boolean);
+    const entry = { ...p, steps };
+    const c = catMap.get(p.category_id);
+    if (c) c.products.push(entry);
+  }
+  ok(res, {
+    categories: out.filter((c) => c.products.length),
+    drinks: products.filter((p) => Number(p.is_drink) === 1),
+  });
+});
+
+/* ================= 時段設定 ================= */
+app.get('/api/time-slots', (req, res) => {
+  ok(res, getDb().prepare('SELECT * FROM time_slots ORDER BY start_time').all());
+});
+app.put('/api/time-slots', managerOnly, (req, res) => {
+  const slots = req.body && req.body.slots;
+  if (!Array.isArray(slots) || !slots.length) return fail(res, '資料不正確');
+  for (const s of slots) {
+    if (!s.code || !s.name) return fail(res, '時段代碼與名稱為必填');
+    if (!/^\d{1,2}:\d{2}$/.test(s.start_time || '') || !/^\d{1,2}:\d{2}$/.test(s.end_time || '')) {
+      return fail(res, '時間格式需為 HH:MM');
+    }
+  }
+  const db = getDb();
+  db.exec('BEGIN');
+  try {
+    db.prepare('DELETE FROM time_slots').run();
+    const ins = db.prepare(`INSERT INTO time_slots (code, name, start_time, end_time, drink_all_free, drink_cold_extra, drink_hot_free)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`);
+    for (const s of slots) {
+      ins.run(s.code, s.name, s.start_time, s.end_time,
+        s.drink_all_free ? 1 : 0, Number(s.drink_cold_extra) || 0, s.drink_hot_free ? 1 : 0);
+    }
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    return fail(res, '儲存失敗：' + e.message);
+  }
+  ok(res, db.prepare('SELECT * FROM time_slots ORDER BY start_time').all());
 });
 
 /* ================= 桌台 ================= */
@@ -293,9 +421,13 @@ app.post('/api/orders', (req, res) => {
   for (const it of items) {
     const p = db.prepare('SELECT * FROM products WHERE id = ?').get(it.product_id);
     if (!p) continue;
-    db.prepare(`INSERT INTO order_items (order_id, product_id, product_name, price, quantity, spec, remark)
-      VALUES (?, ?, ?, ?, ?, ?, ?)`).run(orderId, p.id, p.name, Number(p.price) + Number(it.spec_diff || 0),
-      Number(it.quantity || 1), it.spec ?? null, it.remark ?? null);
+    const calc = computeComboUnitPrice(db, p, it);
+    const itemType = p.kind === 'combo' ? 'combo' : calc.options ? 'combo' : 'simple';
+    db.prepare(`INSERT INTO order_items
+      (order_id, product_id, product_name, price, quantity, spec, remark, item_type, options)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(orderId, p.id, p.name, calc.unit,
+      Number(it.quantity || 1), it.spec ?? null, it.remark ?? null, itemType,
+      calc.options ? JSON.stringify(calc.options) : null);
   }
   recomputeOrderTotal(db, orderId);
   if (table_id && status === 'open') {
@@ -303,18 +435,22 @@ app.post('/api/orders', (req, res) => {
   }
   ok(res, orderWithItems(db, orderId));
 });
-/** 加菜 */
+/** 加菜（支援套餐選項；價格由後端覆核計算） */
 app.post('/api/orders/:id/items', (req, res) => {
   const db = getDb();
   const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
   if (!order || order.status !== 'open') return fail(res, '訂單狀態不可加菜');
-  const { product_id, quantity = 1, spec, spec_diff = 0, remark } = req.body || {};
+  const { product_id, quantity = 1, spec, spec_diff = 0, remark, options } = req.body || {};
   const p = db.prepare('SELECT * FROM products WHERE id = ?').get(product_id);
   if (!p) return fail(res, '菜品不存在', 404);
   if (!p.is_available) return fail(res, `「${p.name}」已售罄`);
-  const r = db.prepare(`INSERT INTO order_items (order_id, product_id, product_name, price, quantity, spec, remark)
-    VALUES (?, ?, ?, ?, ?, ?, ?)`).run(order.id, p.id, p.name, Number(p.price) + Number(spec_diff || 0),
-    Number(quantity), spec ?? null, remark ?? null);
+  const calc = computeComboUnitPrice(db, p, { options, spec_diff });
+  const itemType = p.kind === 'combo' ? 'combo' : calc.options ? 'combo' : 'simple';
+  const r = db.prepare(`INSERT INTO order_items
+    (order_id, product_id, product_name, price, quantity, spec, remark, item_type, options)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(order.id, p.id, p.name, calc.unit,
+    Number(quantity), spec ?? null, remark ?? null, itemType,
+    calc.options ? JSON.stringify(calc.options) : null);
   recomputeOrderTotal(db, order.id);
   ok(res, db.prepare('SELECT * FROM order_items WHERE id = ?').get(Number(r.lastInsertRowid)));
 });
@@ -632,6 +768,12 @@ if (fs.existsSync(distDir)) {
 app.use((req, res) => {
   if (req.path.startsWith('/api')) return fail(res, '接口不存在', 404);
   res.status(404).send('Not Found');
+});
+
+// 統一 JSON 錯誤回應（避免前端解析 HTML 錯誤頁）
+app.use((err, req, res, _next) => {
+  console.error('[API ERROR]', err.message);
+  res.status(500).json({ code: 500, message: '伺服器內部錯誤：' + err.message });
 });
 
 app.listen(PORT, () => {

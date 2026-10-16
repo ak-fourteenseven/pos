@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia';
 import { api } from '../api';
 
-/** 門店基礎資料：分類 / 菜品 / 桌台 / 支付方式 / 設定 */
+/** 門店基礎資料：分類 / 菜品 / 桌台 / 支付方式 / 設定 / 套餐菜單 / 時段 */
 export const useCatalogStore = defineStore('catalog', {
   state: () => ({
     categories: [],
@@ -9,6 +9,8 @@ export const useCatalogStore = defineStore('catalog', {
     tables: [],
     payments: [],
     settings: {},
+    menu: { categories: [], drinks: [] },
+    timeSlots: [],
     loaded: false,
   }),
   getters: {
@@ -23,22 +25,29 @@ export const useCatalogStore = defineStore('catalog', {
   },
   actions: {
     async loadAll() {
-      const [categories, products, tables, payments, settings] = await Promise.all([
+      const [categories, products, tables, payments, settings, menu, timeSlots] = await Promise.all([
         api.get('/categories'),
         api.get('/products?all=1'),
         api.get('/tables'),
         api.get('/payment-methods'),
         api.get('/settings'),
+        api.get('/menu'),
+        api.get('/time-slots'),
       ]);
       this.categories = categories;
       this.products = products;
       this.tables = tables;
       this.payments = payments;
       this.settings = settings;
+      this.menu = menu;
+      this.timeSlots = timeSlots;
       this.loaded = true;
     },
     async reloadTables() {
       this.tables = await api.get('/tables');
+    },
+    async reloadTimeSlots() {
+      this.timeSlots = await api.get('/time-slots');
     },
   },
 });
