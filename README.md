@@ -39,6 +39,7 @@ npm run dev
   - 湯底套餐 5 步向導：湯底 → 麵類（烏冬 +$2）→ 辣度（清湯自動跳過）→ 配料多選（$7/$8/$9/$11 階梯）→ 飲品
   - 湯餃套餐 3 步向導：類型 → 餡料 → 飲品
   - 小食口味彈窗（辣度/風味）
+  - **可隨時取消退出**：取消按鈕 / 右上角 ✕ / ESC / 點背景四種方式皆可離開，取消不會把商品加入購物車
   - **飲品時段計價引擎**：下午茶全免、午/晚市熱飲免費、凍飲 +$3（時段可在後台自訂，價格由後端覆核）
   - 小票雙視圖：顧客收銀單（含時段優惠明細）/ 廚房單（後廚 + 水吧分區）
 - **後台管理**：菜品管理（分類/規格/條碼/emoji/顏色/上下架）、桌台管理（區域/容納人數/狀態）、支付方式設定（啟用停用/手續費率）、員工與權限（收銀員/店長、重設密碼）、門店資訊設定、時段設定。
@@ -55,13 +56,29 @@ POS-dev/
 │   ├── src/db.js         #   SQLite schema + 種子資料（含套餐選項組/時段）
 │   ├── src/index.js      #   REST API + 飲品時段計價引擎
 │   └── data/pos.db       #   本地資料庫（運行後生成）
-└── client/               # Vue 3 前端
-    └── src/
-        ├── views/        #   登入/收銀台/桌台/報表/各後台頁面
-        ├── components/   #   Modal、SVG 圖表、套餐嚮導、飲品彈窗
-        ├── stores/       #   Pinia：auth/pos/catalog/shift/toast
-        └── utils/        #   格式化、CSV/Excel 匯出、飲品計價
+├── client/               # Vue 3 前端
+│   └── src/
+│       ├── views/        #   登入/收銀台/桌台/報表/各後台頁面
+│       ├── components/   #   Modal、SVG 圖表、套餐嚮導、飲品彈窗
+│       ├── stores/       #   Pinia：auth/pos/catalog/shift/toast
+│       └── utils/        #   格式化、CSV/Excel 匯出、飲品計價
+└── tests/e2e/            # Playwright 端對端測試（嚮導關閉回歸 + 整合回歸）
 ```
+
+## 端對端測試
+
+需要服務端（3001）與前端（5173）同時啟動，另需 Chromium（`playwright-core` 不會自動下載瀏覽器）：
+
+```bash
+npm i -D playwright-core
+npx playwright install chromium   # 或設定環境變數 PW_CHROME_PATH 指定瀏覽器路徑
+npm run test:e2e
+```
+
+| 腳本 | 覆蓋範圍 |
+| --- | --- |
+| `tests/e2e/wizard-close.test.js` | 套餐嚮導四種關閉方式（取消 / ✕ / ESC / 點背景）、關閉後購物車不誤加、可重新開啟並完成下單 |
+| `tests/e2e/regression.test.js` | 登入與權限、套餐階梯價與時段價、後端覆核、折扣、收現與結帳、小票雙視圖、掛單取單、桌台模式、報表與後台設定 |
 
 ## 注意事項
 

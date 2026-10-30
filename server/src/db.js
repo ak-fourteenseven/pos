@@ -42,9 +42,13 @@ function hashPassword(pwd) {
 }
 function verifyPassword(pwd, stored) {
   if (!stored || !stored.includes(':')) return false;
-  const [salt, hash] = stored.split(':');
-  const h = crypto.scryptSync(String(pwd), salt, 32).toString('hex');
-  return crypto.timingSafeEqual(Buffer.from(hash, 'hex'), Buffer.from(hash, 'hex'));
+  const [salt, hash] = String(stored).split(':');
+  if (!salt || !hash) return false;
+  const computed = crypto.scryptSync(String(pwd), salt, 32).toString('hex');
+  const a = Buffer.from(computed, 'hex');
+  const b = Buffer.from(hash, 'hex');
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
 }
 
 /* ---------------- Schema ---------------- */

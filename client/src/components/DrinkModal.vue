@@ -5,12 +5,19 @@ import { DRINK_PREFS, drinkPrice, slotRuleText } from '../utils/pricing';
 import { fmtMoney } from '../utils/format';
 
 const props = defineProps({
-  modelValue: { type: Boolean, default: false },
+  // v-model 傳入的即為飲品商品（開啟時為物件，關閉時為 null）
+  modelValue: { type: [Boolean, Object], default: null },
   product: { type: Object, default: null },
   slot: { type: Object, default: null },
   currency: { type: String, default: 'NT$' },
 });
-const emit = defineEmits(['close', 'add']);
+const emit = defineEmits(['close', 'add', 'update:modelValue']);
+
+/** 關閉彈窗：同時通知父層關閉 */
+function onClose() {
+  emit('update:modelValue', null);
+  emit('close');
+}
 
 const temperature = ref('HOT');
 const preferences = ref([]);
@@ -38,7 +45,7 @@ function confirmAdd() {
 </script>
 
 <template>
-  <Modal :model-value="modelValue" :title="product ? `${product.emoji || ''} ${product.name}` : ''" width="max-w-md" @close="emit('close')">
+  <Modal :model-value="modelValue" :title="product ? `${product.emoji || ''} ${product.name}` : ''" width="max-w-md" @close="onClose">
     <div v-if="product" class="space-y-4">
       <div class="flex items-center justify-between">
         <span class="text-sm text-gray-500">原價 {{ fmtMoney(product.price, currency) }}</span>
@@ -84,7 +91,7 @@ function confirmAdd() {
     </div>
 
     <template #footer>
-      <button class="btn-ghost" @click="emit('close')">取消</button>
+      <button class="btn-ghost" @click="onClose">取消</button>
       <button class="btn-primary" @click="confirmAdd">加入購物車</button>
     </template>
   </Modal>

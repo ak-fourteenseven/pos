@@ -5,13 +5,20 @@ import { DRINK_PREFS, drinkPrice, slotRuleText } from '../utils/pricing';
 import { fmtMoney } from '../utils/format';
 
 const props = defineProps({
-  modelValue: { type: Boolean, default: false },
+  // v-model 傳入的即為套餐商品（開啟時為物件，關閉時為 null）
+  modelValue: { type: [Boolean, Object], default: null },
   product: { type: Object, default: null }, // 含 steps 的套餐商品
   drinks: { type: Array, default: () => [] },
   slot: { type: Object, default: null }, // 當前時段
   currency: { type: String, default: 'NT$' },
 });
-const emit = defineEmits(['close', 'add']);
+const emit = defineEmits(['close', 'add', 'update:modelValue']);
+
+/** 關閉嚮導：同時通知父層關閉（取消點單不加入購物車） */
+function onClose() {
+  emit('update:modelValue', null);
+  emit('close');
+}
 
 const stepIdx = ref(0);
 const selections = ref({}); // groupCode -> { id, name, price_diff } | [{...}]
@@ -143,7 +150,7 @@ const stepLabel = computed(() => {
 </script>
 
 <template>
-  <Modal :model-value="modelValue" :title="product ? `${product.emoji || ''} ${product.name}` : ''" width="max-w-xl" @close="emit('close')">
+  <Modal :model-value="modelValue" :title="product ? `${product.emoji || ''} ${product.name}` : ''" width="max-w-xl" @close="onClose">
     <div v-if="product" class="space-y-4">
       <!-- 步驟指示 -->
       <div class="flex items-center gap-2 text-xs font-bold text-gray-400">
@@ -235,6 +242,7 @@ const stepLabel = computed(() => {
     </div>
 
     <template #footer>
+      <button class="btn-ghost" @click="onClose">取消</button>
       <button class="btn-ghost" :disabled="stepIdx === 0" @click="prev">上一步</button>
       <button class="btn-primary" @click="next">{{ isLast ? '加入購物車' : '下一步' }}</button>
     </template>

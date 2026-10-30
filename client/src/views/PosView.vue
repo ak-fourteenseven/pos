@@ -41,10 +41,13 @@ const products = computed(() => {
 });
 
 /* ---------------- 時段（飲品計價） ---------------- */
-const nowSlot = ref(currentSlot(catalog.timeSlots));
+/** 每 10 秒更新一次時間戳，帶動時段重新計算（跨時段邊界即時切換） */
+const nowTick = ref(Date.now());
+/** 時段必須隨時段設定載入即時重算，否則開單初始 10 秒內會誤用原價 */
+const nowSlot = computed(() => currentSlot(catalog.timeSlots, new Date(nowTick.value)));
 let slotTimer = null;
 onMounted(() => {
-  slotTimer = setInterval(() => { nowSlot.value = currentSlot(catalog.timeSlots); }, 10000);
+  slotTimer = setInterval(() => { nowTick.value = Date.now(); }, 10000);
 });
 onUnmounted(() => clearInterval(slotTimer));
 
@@ -810,6 +813,7 @@ const cashShort = computed(() => pos.paymentMethod === 'cash' && pos.received > 
       :slot="nowSlot"
       :currency="catalog.currency"
       @add="onWizardAdd"
+      @close="wizardProduct = null"
     />
 
     <!-- ============ 獨立飲品 ============ -->
@@ -819,6 +823,7 @@ const cashShort = computed(() => pos.paymentMethod === 'cash' && pos.received > 
       :slot="nowSlot"
       :currency="catalog.currency"
       @add="onDrinkAdd"
+      @close="drinkProduct = null"
     />
   </div>
 </template>
