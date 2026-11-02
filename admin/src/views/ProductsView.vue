@@ -1,10 +1,10 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue';
-import { api } from '../api';
-import { useCatalogStore } from '../stores/catalog';
-import { useToastStore } from '../stores/toast';
-import Modal from '../components/Modal.vue';
-import { COLOR_LIST, EMOJI_LIST, fmtMoney } from '../utils/format';
+import { api } from '@shared/api';
+import { useCatalogStore } from '@shared/stores/catalog';
+import { useToastStore } from '@shared/stores/toast';
+import Modal from '@shared/components/Modal.vue';
+import { COLOR_LIST, EMOJI_LIST, fmtMoney } from '@shared/utils/format';
 
 const catalog = useCatalogStore();
 const toast = useToastStore();

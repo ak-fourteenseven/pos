@@ -123,7 +123,9 @@ CREATE TABLE IF NOT EXISTS orders (
   remark TEXT,
   created_at DATETIME DEFAULT (datetime('now','localtime')),
   cashier_id INTEGER,
-  shift_id INTEGER
+  shift_id INTEGER,
+  ordered_at DATETIME,
+  submit_count INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS order_items (
@@ -135,6 +137,7 @@ CREATE TABLE IF NOT EXISTS order_items (
   quantity INTEGER,
   spec TEXT,
   remark TEXT,
+  sent_at DATETIME,
   FOREIGN KEY(order_id) REFERENCES orders(id)
 );
 
@@ -272,6 +275,9 @@ function migrate() {
   add('products', 'skip_group', 'skip_group TEXT');
   add('order_items', 'item_type', "item_type TEXT DEFAULT 'simple'");
   add('order_items', 'options', 'options TEXT');
+  add('order_items', 'sent_at', 'sent_at DATETIME');
+  add('orders', 'ordered_at', 'ordered_at DATETIME');
+  add('orders', 'submit_count', 'submit_count INTEGER DEFAULT 0');
 }
 
 /* ---------------- 種子：粉麵餐店菜單（套餐向導 + 飲品時段計價） ---------------- */

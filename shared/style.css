@@ -61,3 +61,25 @@
 ::-webkit-scrollbar-track {
   background: transparent;
 }
+
+/* 列印：只列印標記 .print-area 的區塊（廚房單 / 收銀單） */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  .print-area,
+  .print-area * {
+    visibility: visible;
+  }
+  .print-area {
+    position: absolute;
+    inset: 0 auto auto 0;
+    width: 100%;
+    margin: 0;
+    padding: 0;
+    box-shadow: none;
+    border: 0;
+    max-height: none;
+    overflow: visible;
+  }
+}

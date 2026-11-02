@@ -50,10 +50,53 @@ function recomputeOrderTotal(db, orderId) {
   db.prepare('UPDATE orders SET total_amount = ? WHERE id = ?').run(row.s, orderId);
 }
 function orderWithItems(db, id) {
-  const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(id);
+  const order = db.prepare('SELECT o.*, t.table_number FROM orders o LEFT JOIN tables t ON t.id = o.table_id WHERE o.id = ?').get(id);
   if (!order) return null;
   order.items = db.prepare('SELECT * FROM order_items WHERE order_id = ? ORDER BY id').all(id);
   return order;
+}
+/** 本地時間 'YYYY-MM-DD HH:MM:SS'（與 SQLite datetime('now','localtime') 同格式） */
+function nowStr() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+/** 組出廚房單（後廚 + 水吧分區）；appended=true 表示為加菜後的追加單 */
+function buildKitchenTicket(order, items) {
+  const food = [];
+  const bar = [];
+  const drinkLine = (it, d) => {
+    const t = d.temperature === 'HOT' ? '熱' : '凍';
+    const prefs = d.preferences && d.preferences.length ? `, ${d.preferences.join(', ')}` : '';
+    bar.push(`${it.quantity}x ${d.name} (${t}${prefs})`);
+  };
+  for (const it of items) {
+    let o = null;
+    try {
+      o = it.options ? (typeof it.options === 'string' ? JSON.parse(it.options) : it.options) : null;
+    } catch { o = null; }
+    if (o && o.drink && Number(o.drink.product_id) === Number(it.product_id) && !o.base) {
+      drinkLine(it, o.drink); // 獨立飲品
+    } else if (o && o.base) {
+      food.push(`${it.quantity}x ${o.base}`);
+      if (o.noodle) food.push(`     麵: ${o.noodle.name}`);
+      if (o.spiciness) food.push(`     辣度: ${o.spiciness.name}`);
+      if (o.filling) food.push(`     餡料: ${o.filling.name}`);
+      if (o.flavor) food.push(`     口味: ${o.flavor.name}`);
+      if (o.toppings && o.toppings.length) food.push(`     加料: ${o.toppings.map((x) => x.name).join(', ')}`);
+      if (o.drink) drinkLine(it, o.drink); // 套餐內飲品同步給水吧
+    } else {
+      food.push(`${it.quantity}x ${it.product_name}${it.spec ? ` [${it.spec}]` : ''}${it.remark ? ` (${it.remark})` : ''}`);
+    }
+  }
+  return {
+    order_no: order.order_no,
+    table_number: order.table_number || null,
+    appended: !!order.ordered_at,
+    created_at: nowStr(),
+    food,
+    bar,
+  };
 }
 function freeTable(db, tableId, status = 'cleaning') {
   db.prepare('UPDATE tables SET status = ?, current_order_id = NULL WHERE id = ?').run(status, tableId);
@@ -304,7 +347,7 @@ app.get('/api/tables', (req, res) => {
     SELECT t.*, o.id AS order_id, o.order_no, o.total_amount, o.created_at AS opened_at,
       (SELECT COALESCE(SUM(oi.quantity), 0) FROM order_items oi WHERE oi.order_id = o.id) AS item_count
     FROM tables t
-    LEFT JOIN orders o ON o.id = t.current_order_id AND o.status = 'open'
+    LEFT JOIN orders o ON o.id = t.current_order_id AND o.status IN ('open', 'ordered')
     ORDER BY t.id`).all();
   ok(res, rows);
 });
@@ -340,8 +383,9 @@ app.patch('/api/tables/:id/status', (req, res) => {
   const t = db.prepare('SELECT * FROM tables WHERE id = ?').get(req.params.id);
   if (!t) return fail(res, '桌台不存在', 404);
   const { status } = req.body || {};
-  if (!['available', 'occupied', 'reserved', 'cleaning'].includes(status)) return fail(res, '狀態不合法');
+  if (!['available', 'occupied', 'reserved', 'cleaning', 'preparing'].includes(status)) return fail(res, '狀態不合法');
   if (status === 'occupied') return fail(res, '請透過開台佔用桌台');
+  if (status === 'preparing') return fail(res, '桌台狀態由下單送廚自動切換');
   db.prepare('UPDATE tables SET status = ?, current_order_id = NULL WHERE id = ?').run(status, t.id);
   ok(res, { updated: true });
 });
@@ -350,7 +394,7 @@ app.post('/api/tables/:id/open', (req, res) => {
   const db = getDb();
   const t = db.prepare('SELECT * FROM tables WHERE id = ?').get(req.params.id);
   if (!t) return fail(res, '桌台不存在', 404);
-  if (t.status === 'occupied') return fail(res, '桌台已在用餐中');
+  if (t.status === 'occupied' || t.status === 'preparing') return fail(res, '桌台已在用餐中');
   const r = db.prepare(`INSERT INTO orders (order_no, table_id, status, cashier_id)
     VALUES (?, ?, 'open', ?)`).run(genOrderNo(db), t.id, req.user.id);
   const orderId = Number(r.lastInsertRowid);
@@ -365,9 +409,9 @@ app.post('/api/tables/merge', (req, res) => {
   const from = db.prepare('SELECT * FROM tables WHERE id = ?').get(from_id);
   const to = db.prepare('SELECT * FROM tables WHERE id = ?').get(to_id);
   if (!from || !to) return fail(res, '桌台不存在', 404);
-  const fromOrder = db.prepare("SELECT * FROM orders WHERE table_id = ? AND status = 'open'").get(from.id);
+  const fromOrder = db.prepare("SELECT * FROM orders WHERE table_id = ? AND status IN ('open','ordered')").get(from.id);
   if (!fromOrder) return fail(res, '來源桌台沒有進行中的訂單');
-  const toOrder = db.prepare("SELECT * FROM orders WHERE table_id = ? AND status = 'open'").get(to.id);
+  const toOrder = db.prepare("SELECT * FROM orders WHERE table_id = ? AND status IN ('open','ordered')").get(to.id);
   if (toOrder) {
     db.prepare('UPDATE order_items SET order_id = ? WHERE order_id = ?').run(toOrder.id, fromOrder.id);
     db.prepare('DELETE FROM orders WHERE id = ?').run(fromOrder.id);
@@ -435,11 +479,11 @@ app.post('/api/orders', (req, res) => {
   }
   ok(res, orderWithItems(db, orderId));
 });
-/** 加菜（支援套餐選項；價格由後端覆核計算） */
+/** 加菜（支援套餐選項；價格由後端覆核計算）。送廚後仍可加菜，加菜內容需再次下單送廚 */
 app.post('/api/orders/:id/items', (req, res) => {
   const db = getDb();
   const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
-  if (!order || order.status !== 'open') return fail(res, '訂單狀態不可加菜');
+  if (!order || (order.status !== 'open' && order.status !== 'ordered')) return fail(res, '訂單狀態不可加菜');
   const { product_id, quantity = 1, spec, spec_diff = 0, remark, options } = req.body || {};
   const p = db.prepare('SELECT * FROM products WHERE id = ?').get(product_id);
   if (!p) return fail(res, '菜品不存在', 404);
@@ -457,28 +501,73 @@ app.post('/api/orders/:id/items', (req, res) => {
 app.put('/api/orders/:id/items/:itemId', (req, res) => {
   const db = getDb();
   const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
-  if (!order || order.status !== 'open') return fail(res, '訂單狀態不可修改');
+  if (!order || (order.status !== 'open' && order.status !== 'ordered')) return fail(res, '訂單狀態不可修改');
+  const it = db.prepare('SELECT * FROM order_items WHERE id = ? AND order_id = ?').get(req.params.itemId, order.id);
+  if (!it) return fail(res, '訂單明細不存在', 404);
+  if (it.sent_at) return fail(res, '已送廚的菜品不可改數量，請退菜後重新點');
   const { quantity, remark } = req.body || {};
   db.prepare('UPDATE order_items SET quantity = ?, remark = ? WHERE id = ? AND order_id = ?')
     .run(Number(quantity), remark ?? null, req.params.itemId, order.id);
   recomputeOrderTotal(db, order.id);
   ok(res, { updated: true });
 });
-/** 退菜 */
+/** 退菜：已送廚的明細需店長權限（避免廚房已動工） */
 app.delete('/api/orders/:id/items/:itemId', (req, res) => {
   const db = getDb();
   const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
-  if (!order || order.status !== 'open') return fail(res, '訂單狀態不可退菜');
+  if (!order || (order.status !== 'open' && order.status !== 'ordered')) return fail(res, '訂單狀態不可退菜');
+  const it = db.prepare('SELECT * FROM order_items WHERE id = ? AND order_id = ?').get(req.params.itemId, order.id);
+  if (!it) return fail(res, '訂單明細不存在', 404);
+  if (it.sent_at && req.user.role !== 'manager') return fail(res, '已送廚的菜品需店長權限才能退菜', 403);
   db.prepare('DELETE FROM order_items WHERE id = ? AND order_id = ?').run(req.params.itemId, order.id);
   recomputeOrderTotal(db, order.id);
   ok(res, { deleted: true });
+});
+/** 下單（送廚房）：把未送廚明細標記送廚，訂單進入「已送廚」，並回傳廚房單 */
+app.post('/api/orders/:id/submit', (req, res) => {
+  const db = getDb();
+  const order = db.prepare('SELECT o.*, t.table_number FROM orders o LEFT JOIN tables t ON t.id = o.table_id WHERE o.id = ?').get(req.params.id);
+  if (!order) return fail(res, '訂單不存在', 404);
+  if (order.status !== 'open' && order.status !== 'ordered') return fail(res, '訂單狀態不可下單');
+  const pending = db.prepare('SELECT * FROM order_items WHERE order_id = ? AND sent_at IS NULL').all(order.id);
+  if (!pending.length) return fail(res, '沒有待送廚的新增菜品');
+  const now = nowStr();
+  const mark = db.prepare('UPDATE order_items SET sent_at = ? WHERE id = ? AND sent_at IS NULL');
+  db.exec('BEGIN');
+  try {
+    for (const it of pending) mark.run(now, it.id);
+    db.prepare(`UPDATE orders SET status = 'ordered', ordered_at = COALESCE(ordered_at, ?),
+      submit_count = COALESCE(submit_count, 0) + 1 WHERE id = ?`).run(now, order.id);
+    if (order.table_id) {
+      db.prepare("UPDATE tables SET status = 'preparing', current_order_id = ? WHERE id = ?")
+        .run(order.id, order.table_id);
+    }
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    return fail(res, '送廚失敗：' + e.message);
+  }
+  ok(res, {
+    appended: !!order.ordered_at,
+    sent_count: pending.length,
+    ticket: buildKitchenTicket(order, pending),
+  });
+});
+/** 廚房單（補印/重印）：取該訂單已送廚的全部明細 */
+app.get('/api/orders/:id/ticket', (req, res) => {
+  const db = getDb();
+  const order = db.prepare('SELECT o.*, t.table_number FROM orders o LEFT JOIN tables t ON t.id = o.table_id WHERE o.id = ?').get(req.params.id);
+  if (!order) return fail(res, '訂單不存在', 404);
+  const sent = db.prepare('SELECT * FROM order_items WHERE order_id = ? AND sent_at IS NOT NULL ORDER BY id').all(order.id);
+  if (!sent.length) return fail(res, '該訂單尚未下單送廚');
+  ok(res, buildKitchenTicket(order, sent));
 });
 /** 換桌 / 備註 */
 app.patch('/api/orders/:id', (req, res) => {
   const db = getDb();
   const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
   if (!order) return fail(res, '訂單不存在', 404);
-  if (order.status !== 'open') return fail(res, '僅進行中的訂單可換桌');
+  if (order.status !== 'open' && order.status !== 'ordered') return fail(res, '僅進行中的訂單可換桌');
   const { table_id, remark } = req.body || {};
   if (table_id != null && Number(table_id) !== order.table_id) {
     const t = db.prepare('SELECT * FROM tables WHERE id = ?').get(table_id);
@@ -502,6 +591,8 @@ app.post('/api/orders/:id/pay', (req, res) => {
   if (!payment_method) return fail(res, '請選擇支付方式');
   const items = db.prepare('SELECT * FROM order_items WHERE order_id = ?').all(order.id);
   if (!items.length) return fail(res, '訂單無明細，無法結帳');
+  const sentCount = items.filter((it) => it.sent_at).length;
+  if (!sentCount) return fail(res, '請先下單送廚房，顧客用餐後再結賬');
   const subtotal = items.reduce((s, it) => s + it.price * it.quantity, 0);
   const settings = getSettings(db);
   const serviceRate = Number(settings.service_fee_rate || 0);

@@ -1,8 +1,8 @@
 <script setup>
 import { onMounted, ref } from 'vue';
-import { api } from '../api';
-import { useCatalogStore } from '../stores/catalog';
-import { useToastStore } from '../stores/toast';
+import { api } from '@shared/api';
+import { useCatalogStore } from '@shared/stores/catalog';
+import { useToastStore } from '@shared/stores/toast';
 
 const catalog = useCatalogStore();
 const toast = useToastStore();

@@ -1,9 +1,9 @@
 <script setup>
 import { onMounted, reactive, ref, watch } from 'vue';
-import { api } from '../api';
-import { useCatalogStore } from '../stores/catalog';
-import { useToastStore } from '../stores/toast';
-import { fmtNum } from '../utils/format';
+import { api } from '@shared/api';
+import { useCatalogStore } from '@shared/stores/catalog';
+import { useToastStore } from '@shared/stores/toast';
+import { fmtNum } from '@shared/utils/format';
 
 const catalog = useCatalogStore();
 const toast = useToastStore();

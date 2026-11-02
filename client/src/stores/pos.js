@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia';
-import { api } from '../api';
-import { useCatalogStore } from './catalog';
-import { useToastStore } from './toast';
+import { api } from '@shared/api';
+import { useCatalogStore } from '@shared/stores/catalog';
+import { useToastStore } from '@shared/stores/toast';
 
 /**
  * 收銀台購物車
@@ -36,7 +36,11 @@ export const usePosStore = defineStore('pos', {
     change(state) {
       return Math.max(0, Number(state.received || 0) - state.total);
     },
-    isTableMode: (s) => s.orderId != null,
+    isTableMode: (s) => s.tableId != null,
+    /** 是否已建立服務端訂單（開台或快餐下單後） */
+    hasServerOrder: (s) => s.orderId != null,
+    /** 尚未送廚的明細數量（>0 時需按「下單」送廚房） */
+    pendingCount: (s) => s.items.filter((it) => !it.sent).length,
   },
   actions: {
     reset() {
@@ -74,6 +78,8 @@ export const usePosStore = defineStore('pos', {
         remark: it.remark || '',
         item_type: it.item_type || 'simple',
         options,
+        sent: !!it.sent_at,
+        sent_at: it.sent_at || null,
       };
     },
     /** 一般單品（含舊版規格） */
@@ -207,6 +213,35 @@ export const usePosStore = defineStore('pos', {
       if (i.options) payload.options = i.options;
       else if (i.spec_diff) payload.spec_diff = i.spec_diff;
       return payload;
+    },
+    /**
+     * 下單（送廚房）：把未送廚明細標記送廚並取回廚房單。
+     * 快餐/外帶模式會先建立訂單再送廚；已下過單的訂單則送加菜追加。
+     * @returns {{ appended: boolean, sent_count: number, ticket: object }}
+     */
+    async submitOrder() {
+      if (!this.items.length) throw new Error('購物車為空，無可下單');
+      let orderId = this.orderId;
+      if (!orderId) {
+        const created = await api.post('/orders', {
+          items: this.items.map((i) => this.itemPayload(i)),
+        });
+        orderId = created.id;
+        if (created.items && created.items.length) {
+          this.items = created.items.map((it) => this.mapItem(it));
+          this.orderId = orderId;
+        }
+      }
+      const res = await api.post(`/orders/${orderId}/submit`);
+      // 以服務端狀態刷新購物車（明細帶上 sent_at）
+      const full = await api.get(`/orders/${orderId}`);
+      if (full && full.items) this.items = full.items.map((it) => this.mapItem(it));
+      return res;
+    },
+    /** 廚房單（補印/重印：取該訂單已送廚的全部明細） */
+    async kitchenTicket() {
+      if (!this.orderId) throw new Error('尚未下單，無廚房單');
+      return api.get(`/orders/${this.orderId}/ticket`);
     },
     /** 結帳：返回已結帳訂單 */
     async checkout() {

@@ -1,14 +1,14 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue';
-import { api } from '../api';
-import { useCatalogStore } from '../stores/catalog';
-import { useShiftStore } from '../stores/shift';
-import { useToastStore } from '../stores/toast';
+import { api } from '@shared/api';
+import { useCatalogStore } from '@shared/stores/catalog';
+import { useShiftStore } from '@shared/stores/shift';
+import { useToastStore } from '@shared/stores/toast';
 import BarChart from '../components/charts/BarChart.vue';
 import LineChart from '../components/charts/LineChart.vue';
 import DonutChart from '../components/charts/DonutChart.vue';
 import { downloadCSV, downloadExcel } from '../utils/export';
-import { fmtDateTime, fmtMoney, fmtNum, fmtPct, thisMonth, today } from '../utils/format';
+import { fmtDateTime, fmtMoney, fmtNum, fmtPct, thisMonth, today } from '@shared/utils/format';
 
 const catalog = useCatalogStore();
 const shift = useShiftStore();

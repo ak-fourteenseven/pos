@@ -1,11 +1,11 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
-import { api } from '../api';
-import { useCatalogStore } from '../stores/catalog';
+import { api } from '@shared/api';
+import { useCatalogStore } from '@shared/stores/catalog';
 import { usePosStore } from '../stores/pos';
-import { useToastStore } from '../stores/toast';
-import { fmtMoney, fmtTime, TABLE_STATUS } from '../utils/format';
+import { useToastStore } from '@shared/stores/toast';
+import { fmtMoney, fmtTime, TABLE_STATUS } from '@shared/utils/format';
 
 const catalog = useCatalogStore();
 const pos = usePosStore();
@@ -33,7 +33,8 @@ const areas = computed(() => {
   return [...map.entries()];
 });
 
-const occupiedCount = computed(() => catalog.tables.filter((t) => t.status === 'occupied').length);
+/** 用餐中 = 点餐中 + 制作中 */
+const busyCount = computed(() => catalog.tables.filter((t) => t.status === 'occupied' || t.status === 'preparing').length);
 
 async function reload() {
   try {
@@ -117,7 +118,7 @@ async function doMerge() {
     <!-- 工具列 -->
     <div class="flex items-center gap-3 mb-5 flex-wrap">
       <div class="chip bg-white border border-gray-200 text-gray-600 shadow-sm">
-        用餐中 {{ occupiedCount }} / {{ catalog.tables.length }} 桌
+        用餐中 {{ busyCount }} / {{ catalog.tables.length }} 桌
       </div>
       <div class="flex gap-2 text-xs text-gray-400">
         <span v-for="(s, k) in TABLE_STATUS" :key="k" class="flex items-center gap-1">
@@ -144,10 +145,10 @@ async function doMerge() {
           class="card p-4 border-2 transition"
           :class="[
             TABLE_STATUS[t.status]?.cls,
-            mergeMode && t.status === 'occupied' ? 'cursor-pointer hover:shadow-md' : '',
+            mergeMode && (t.status === 'occupied' || t.status === 'preparing') ? 'cursor-pointer hover:shadow-md' : '',
             mergeSelected.includes(t.id) ? 'ring-4 ring-brand-300' : '',
           ]"
-          @click="mergeMode && t.status === 'occupied' && toggleMergeSelect(t)"
+          @click="mergeMode && (t.status === 'occupied' || t.status === 'preparing') && toggleMergeSelect(t)"
         >
           <div class="flex items-center justify-between">
             <span class="text-xl font-extrabold">{{ t.table_number }}</span>
@@ -155,11 +156,15 @@ async function doMerge() {
           </div>
           <div class="text-xs text-gray-400 mt-1">{{ t.capacity }} 人桌</div>
 
-          <template v-if="t.status === 'occupied'">
+          <template v-if="t.status === 'occupied' || t.status === 'preparing'">
             <div class="mt-2 text-sm font-bold">{{ fmtMoney(t.total_amount || 0, catalog.currency) }}</div>
-            <div class="text-xs text-gray-400">{{ t.item_count }} 件 · {{ fmtTime(t.opened_at) }} 開台</div>
+            <div class="text-xs text-gray-400">
+              {{ t.item_count }} 件 · {{ fmtTime(t.opened_at) }} {{ t.status === 'preparing' ? '送廚' : '開台' }}
+            </div>
             <div class="mt-2 flex gap-2">
-              <button class="btn-primary btn-sm flex-1" @click.stop="continueOrder(t)">繼續點餐</button>
+              <button class="btn-primary btn-sm flex-1" @click.stop="continueOrder(t)">
+                {{ t.status === 'preparing' ? '繼續點餐 / 結賬' : '繼續點餐' }}
+              </button>
             </div>
           </template>
           <template v-else-if="t.status === 'available'">

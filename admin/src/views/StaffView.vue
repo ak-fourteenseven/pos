@@ -1,9 +1,9 @@
 <script setup>
 import { onMounted, ref } from 'vue';
-import { api } from '../api';
-import { useAuthStore } from '../stores/auth';
-import { useToastStore } from '../stores/toast';
-import Modal from '../components/Modal.vue';
+import { api } from '@shared/api';
+import { useAuthStore } from '@shared/stores/auth';
+import { useToastStore } from '@shared/stores/toast';
+import Modal from '@shared/components/Modal.vue';
 
 const auth = useAuthStore();
 const toast = useToastStore();

@@ -1,8 +1,8 @@
 <script setup>
 import { computed, ref, watch } from 'vue';
-import Modal from './Modal.vue';
-import { DRINK_PREFS, drinkPrice, slotRuleText } from '../utils/pricing';
-import { fmtMoney } from '../utils/format';
+import Modal from '@shared/components/Modal.vue';
+import { DRINK_PREFS, drinkPrice, slotRuleText } from '@shared/utils/pricing';
+import { fmtMoney } from '@shared/utils/format';
 
 const props = defineProps({
   // v-model 傳入的即為飲品商品（開啟時為物件，關閉時為 null）

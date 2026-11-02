@@ -1,18 +1,19 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
-import { api } from '../api';
-import { useAuthStore } from '../stores/auth';
-import { useCatalogStore } from '../stores/catalog';
+import { api } from '@shared/api';
+import { useAuthStore } from '@shared/stores/auth';
+import { useCatalogStore } from '@shared/stores/catalog';
 import { usePosStore } from '../stores/pos';
-import { useToastStore } from '../stores/toast';
-import Modal from '../components/Modal.vue';
+import { useToastStore } from '@shared/stores/toast';
+import Modal from '@shared/components/Modal.vue';
 import ComboWizard from '../components/ComboWizard.vue';
 import DrinkModal from '../components/DrinkModal.vue';
+import KitchenTicketModal from '../components/KitchenTicketModal.vue';
 import {
   fmtMoney, fmtTime, hexA, PAYMENT_META, ORDER_STATUS, QUICK_REMARKS, today,
-} from '../utils/format';
-import { currentSlot, modifiersSum, slotRuleText } from '../utils/pricing';
+} from '@shared/utils/format';
+import { currentSlot, modifiersSum, slotRuleText } from '@shared/utils/pricing';
 
 const auth = useAuthStore();
 const catalog = useCatalogStore();
@@ -69,6 +70,8 @@ const voidModal = ref(false);
 const wizardProduct = ref(null);
 const drinkProduct = ref(null);
 const receiptTab = ref('customer');
+const ticketModal = ref(false);
+const ticket = ref(null);
 
 /* ---------------- 初始化 ---------------- */
 onMounted(async () => {
@@ -279,10 +282,46 @@ async function moveToTable(t) {
   }
 }
 
+/* ---------------- 下單（送廚房） ---------------- */
+const submitting = ref(false);
+async function submitOrder() {
+  if (!pos.items.length) {
+    toast.error('購物車為空');
+    return;
+  }
+  submitting.value = true;
+  try {
+    const res = await pos.submitOrder();
+    ticket.value = res.ticket;
+    ticketModal.value = true;
+    await catalog.reloadTables();
+    toast.success(res.appended
+      ? `已送廚（追加 ${res.sent_count} 項），廚房單已產生`
+      : `已下單送廚（${res.sent_count} 項），廚房單已產生`);
+  } catch (e) {
+    toast.error(e.message);
+  } finally {
+    submitting.value = false;
+  }
+}
+/** 廚房單補印（重印該訂單已送廚的全部明細） */
+async function reprintTicket() {
+  try {
+    ticket.value = await pos.kitchenTicket();
+    ticketModal.value = true;
+  } catch (e) {
+    toast.error(e.message);
+  }
+}
+
 /* ---------------- 結帳 / 作廢 ---------------- */
 async function checkout() {
   if (!pos.items.length) {
     toast.error('購物車為空');
+    return;
+  }
+  if (pos.pendingCount > 0) {
+    toast.error('請先「下單」送廚房，顧客用餐後再結賬');
     return;
   }
   if (pos.paymentMethod === 'cash' && pos.received < pos.total) {
@@ -370,15 +409,27 @@ const cashShort = computed(() => pos.paymentMethod === 'cash' && pos.received > 
     <section class="flex-1 flex flex-col min-w-0">
       <!-- 工具列 -->
       <div class="bg-white border-b border-gray-200 px-4 py-2.5 flex items-center gap-2 flex-wrap shrink-0">
-        <span class="chip" :class="pos.isTableMode ? 'bg-brand-100 text-brand-700' : 'bg-gray-100 text-gray-600'">
-          {{ pos.isTableMode ? `🪑 桌台 ${pos.tableNumber} · ${pos.orderNo}` : '🥡 快餐模式（未開台）' }}
+        <span
+          class="chip"
+          :class="pos.tableId ? 'bg-brand-100 text-brand-700' : pos.hasServerOrder ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-600'"
+        >
+          <template v-if="pos.tableId">🪑 桌台 {{ pos.tableNumber }} · {{ pos.orderNo }}</template>
+          <template v-else-if="pos.hasServerOrder">🥡 外帶 / 快餐 · {{ pos.orderNo }}</template>
+          <template v-else>🥡 快餐模式（未開台）</template>
+        </span>
+        <span v-if="pos.hasServerOrder" class="chip" :class="pos.pendingCount ? 'bg-gray-100 text-gray-500' : 'bg-emerald-100 text-emerald-700'">
+          {{ pos.pendingCount ? `${pos.pendingCount} 項待送廚` : '已全部送廚' }}
         </span>
         <button class="btn-ghost btn-sm" @click="router.push('/tables')">桌台視圖</button>
-        <button class="btn-ghost btn-sm" :disabled="!pos.items.length || pos.isTableMode" @click="holdOrder">掛單</button>
+        <button class="btn-ghost btn-sm !text-brand-600 !border-brand-300" :disabled="!pos.pendingCount || submitting" @click="submitOrder">
+          🥘 下單（送廚房）
+        </button>
+        <button class="btn-ghost btn-sm" :disabled="!pos.hasServerOrder" @click="reprintTicket">廚房單補印</button>
+        <button class="btn-ghost btn-sm" :disabled="!pos.items.length || pos.hasServerOrder" @click="holdOrder">掛單</button>
         <button class="btn-ghost btn-sm" @click="heldModal = true">取單（{{ pos.heldOrders.length }}）</button>
         <button class="btn-ghost btn-sm" @click="openOrders">今日訂單</button>
-        <button v-if="pos.isTableMode" class="btn-ghost btn-sm" @click="moveModal = true">換桌</button>
-        <button v-if="pos.isTableMode && auth.isManager" class="btn-ghost btn-sm !text-red-500" @click="voidModal = true">作廢</button>
+        <button v-if="pos.tableId" class="btn-ghost btn-sm" @click="moveModal = true">換桌</button>
+        <button v-if="pos.hasServerOrder && auth.isManager" class="btn-ghost btn-sm !text-red-500" @click="voidModal = true">作廢</button>
         <div class="flex-1" />
         <span class="chip bg-amber-100 text-amber-700">🕐 {{ slotRuleText(nowSlot) }}</span>
         <span v-if="catalog.serviceRate > 0" class="chip bg-amber-100 text-amber-700">服務費 {{ catalog.serviceRate }}%</span>
@@ -458,6 +509,8 @@ const cashShort = computed(() => pos.paymentMethod === 'cash' && pos.received > 
             <div class="font-bold text-sm text-gray-800 truncate">
               {{ item.name }}
               <span v-if="item.item_type === 'combo'" class="chip bg-brand-100 text-brand-700 text-[10px] ml-1">套餐</span>
+              <span v-if="item.sent" class="chip bg-emerald-100 text-emerald-700 text-[10px] ml-1">已送廚</span>
+              <span v-else class="chip bg-gray-100 text-gray-400 text-[10px] ml-1">未送廚</span>
             </div>
             <div v-for="(line, i) in optionLines(item)" :key="i" class="text-xs text-gray-400 mt-0.5 truncate">{{ line }}</div>
             <div v-if="item.spec || item.remark" class="text-xs text-gray-400 mt-0.5 truncate">
@@ -476,7 +529,14 @@ const cashShort = computed(() => pos.paymentMethod === 'cash' && pos.received > 
             </div>
             <div class="flex gap-2 text-xs">
               <button class="text-gray-400 hover:text-brand-500" @click="editItem(item)">備註</button>
-              <button class="text-gray-400 hover:text-red-500" @click="pos.removeItem(item)">退菜</button>
+              <button
+                class="text-gray-400 hover:text-red-500 disabled:text-gray-200 disabled:cursor-not-allowed"
+                :disabled="item.sent && !auth.isManager"
+                :title="item.sent && !auth.isManager ? '已送廚的菜品需店長權限才能退菜' : ''"
+                @click="pos.removeItem(item)"
+              >
+                退菜
+              </button>
             </div>
           </div>
         </div>
@@ -547,11 +607,22 @@ const cashShort = computed(() => pos.paymentMethod === 'cash' && pos.received > 
         </div>
       </div>
 
-      <!-- 結帳 -->
-      <div class="p-4 border-t border-gray-100 shrink-0">
-        <button class="btn-primary w-full py-3.5 text-lg" :disabled="!pos.items.length" @click="checkout">
-          結帳 {{ fmtMoney(pos.total, catalog.currency) }}
+      <!-- 下單（送廚房） / 結賬 -->
+      <div class="p-4 border-t border-gray-100 shrink-0 space-y-2">
+        <button
+          v-if="pos.pendingCount"
+          class="btn-ghost w-full py-3 text-base !border-brand-300 !text-brand-600"
+          :disabled="submitting"
+          @click="submitOrder"
+        >
+          {{ submitting ? '送廚中…' : `🥘 下單（送廚房）· ${pos.pendingCount} 項待送` }}
         </button>
+        <button class="btn-primary w-full py-3.5 text-lg" :disabled="!pos.items.length || !!pos.pendingCount" @click="checkout">
+          💰 結賬 {{ fmtMoney(pos.total, catalog.currency) }}
+        </button>
+        <p v-if="pos.pendingCount" class="text-center text-xs text-gray-400">
+          請先「下單」送廚房，顧客用餐後再結賬
+        </p>
       </div>
     </aside>
 
@@ -825,5 +896,8 @@ const cashShort = computed(() => pos.paymentMethod === 'cash' && pos.received > 
       @add="onDrinkAdd"
       @close="drinkProduct = null"
     />
+
+    <!-- ============ 廚房單（下單送廚 / 補印） ============ -->
+    <KitchenTicketModal v-model="ticketModal" :ticket="ticket" :currency="catalog.currency" />
   </div>
 </template>
