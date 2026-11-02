@@ -67,7 +67,7 @@ const pageTitle = computed(() => route.meta.title || '');
     <!-- 側邊欄 -->
     <aside class="w-60 shrink-0 bg-gray-900 text-gray-300 flex flex-col">
       <div class="px-5 py-5 border-b border-gray-800">
-        <div class="text-2xl">🍽️</div>
+        <div class="ico-lg">🍽️</div>
         <div class="mt-1 font-extrabold text-white leading-tight">{{ catalog.storeName }}</div>
         <div class="text-[11px] text-gray-500">前台收銀</div>
       </div>
@@ -81,7 +81,7 @@ const pageTitle = computed(() => route.meta.title || '');
           class="flex items-center gap-3 mx-2 px-3 py-2.5 rounded-lg text-sm font-bold transition"
           :class="route.path.startsWith(n.path) ? 'bg-brand-500 text-white' : 'hover:bg-gray-800'"
         >
-          <span class="text-lg">{{ n.icon }}</span>{{ n.title }}
+          <span class="ico">{{ n.icon }}</span>{{ n.title }}
         </router-link>
       </nav>
 

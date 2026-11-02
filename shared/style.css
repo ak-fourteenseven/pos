@@ -48,6 +48,18 @@
   .chip {
     @apply inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-bold;
   }
+  /* 統一 emoji 圖示的視覺尺寸：emoji 字體內建度量不一，固定寬度與字級讓各處對齊一致 */
+  .ico {
+    @apply inline-flex items-center justify-center shrink-0 leading-none;
+    width: 1.05rem;
+    font-size: 0.95rem;
+  }
+  /* 大尺寸圖示（導航 / 頁首） */
+  .ico-lg {
+    @apply inline-flex items-center justify-center shrink-0 leading-none;
+    width: 1.5rem;
+    font-size: 1.35rem;
+  }
 }
 
 /* 細滾動條 */

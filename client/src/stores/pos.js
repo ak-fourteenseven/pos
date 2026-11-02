@@ -6,7 +6,7 @@ import { useToastStore } from '@shared/stores/toast';
 /**
  * 收銀台購物車
  * - 開台模式：orderId 不為 null，每次加菜/改動即時同步服務端
- * - 快餐/掛單模式：orderId 為 null，購物車暫存於前端，結帳時一次性建立訂單
+ * - 快餐/外帶模式：orderId 為 null，購物車暫存於前端，下單時一次性建立訂單
  */
 let tempSeq = 0;
 
@@ -21,7 +21,6 @@ export const usePosStore = defineStore('pos', {
     discountLabel: '',
     paymentMethod: 'cash',
     received: 0,
-    heldOrders: [],
   }),
   getters: {
     catalog() { return useCatalogStore(); },
@@ -179,28 +178,6 @@ export const usePosStore = defineStore('pos', {
     },
     setReceived(v) {
       this.received = v;
-    },
-    /** 掛單（僅快餐/無桌台模式） */
-    async hold() {
-      if (!this.items.length) throw new Error('購物車為空，無可掛單');
-      if (this.orderId) throw new Error('桌台訂單請直接結帳或作廢');
-      const order = await api.post('/orders', {
-        status: 'held',
-        items: this.items.map((i) => this.itemPayload(i)),
-      });
-      this.reset();
-      return order;
-    },
-    async loadHeld() {
-      this.heldOrders = await api.get('/orders?status=held&limit=50');
-    },
-    /** 取單：把掛單載入購物車並刪除掛單記錄 */
-    async resumeHeld(order) {
-      const full = await api.get(`/orders/${order.id}`);
-      this.reset();
-      this.items = (full.items || []).map((it) => this.mapItem(it));
-      await api.del(`/orders/${order.id}`);
-      this.loadHeld();
     },
     /** 組裝傳給後端的明細 payload（含套餐選項） */
     itemPayload(i) {

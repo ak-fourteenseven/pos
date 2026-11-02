@@ -24,7 +24,7 @@ function print() {
   <Modal :model-value="modelValue" title="廚房單（後廚 / 水吧）" width="max-w-md" @close="onClose">
     <div v-if="ticket" class="print-area space-y-4">
       <div class="text-center space-y-1">
-        <div class="font-extrabold text-lg">🍳 廚房單</div>
+        <div class="font-extrabold text-lg flex items-center justify-center gap-1.5"><span class="ico">🍳</span>廚房單</div>
         <div class="text-xs text-gray-400">
           {{ ticket.order_no }}<span v-if="ticket.table_number"> · 桌台 {{ ticket.table_number }}</span> · {{ ticket.created_at }}
         </div>

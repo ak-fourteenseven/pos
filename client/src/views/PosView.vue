@@ -59,7 +59,6 @@ const specForm = ref({ product: null, qty: 1, spec: '', remark: '', editing: nul
 const discountModal = ref(false);
 const discountForm = ref({ mode: 'rate', rate: 95, amount: 0 });
 
-const heldModal = ref(false);
 const ordersModal = ref(false);
 const todayOrders = ref([]);
 const ordersDetail = ref(null);
@@ -77,7 +76,6 @@ const ticket = ref(null);
 onMounted(async () => {
   try {
     await catalog.loadAll();
-    await pos.loadHeld();
   } catch (e) {
     toast.error(e.message);
   }
@@ -193,26 +191,6 @@ function applyDiscount() {
   discountModal.value = false;
 }
 
-/* ---------------- 掛單 / 取單 ---------------- */
-async function holdOrder() {
-  try {
-    await pos.hold();
-    await pos.loadHeld();
-    toast.success('已掛單，可在「取單」恢復');
-  } catch (e) {
-    toast.error(e.message);
-  }
-}
-async function resumeHeld(order) {
-  try {
-    await pos.resumeHeld(order);
-    heldModal.value = false;
-    toast.success('已取單');
-  } catch (e) {
-    toast.error(e.message);
-  }
-}
-
 /* ---------------- 今日訂單 ---------------- */
 async function openOrders() {
   try {
@@ -251,17 +229,6 @@ async function voidOrderRow(o) {
     todayOrders.value = await api.get(`/orders?date=${today()}&limit=100`);
     ordersDetail.value = null;
     toast.success('訂單已作廢');
-  } catch (e) {
-    toast.error(e.message);
-  }
-}
-async function deleteHeldRow(o) {
-  if (!confirm(`確定刪除掛單 ${o.order_no}？`)) return;
-  try {
-    await api.del(`/orders/${o.id}`);
-    todayOrders.value = await api.get(`/orders?date=${today()}&limit=100`);
-    await pos.loadHeld();
-    toast.success('掛單已刪除');
   } catch (e) {
     toast.error(e.message);
   }
@@ -331,7 +298,6 @@ async function checkout() {
   try {
     receipt.value = await pos.checkout();
     await catalog.reloadTables();
-    await pos.loadHeld();
   } catch (e) {
     toast.error(e.message);
   }
@@ -407,32 +373,50 @@ const cashShort = computed(() => pos.paymentMethod === 'cash' && pos.received > 
   <div class="h-full flex">
     <!-- 左：菜品展示區 -->
     <section class="flex-1 flex flex-col min-w-0">
-      <!-- 工具列 -->
-      <div class="bg-white border-b border-gray-200 px-4 py-2.5 flex items-center gap-2 flex-wrap shrink-0">
-        <span
-          class="chip"
-          :class="pos.tableId ? 'bg-brand-100 text-brand-700' : pos.hasServerOrder ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-600'"
-        >
-          <template v-if="pos.tableId">🪑 桌台 {{ pos.tableNumber }} · {{ pos.orderNo }}</template>
-          <template v-else-if="pos.hasServerOrder">🥡 外帶 / 快餐 · {{ pos.orderNo }}</template>
-          <template v-else>🥡 快餐模式（未開台）</template>
-        </span>
-        <span v-if="pos.hasServerOrder" class="chip" :class="pos.pendingCount ? 'bg-gray-100 text-gray-500' : 'bg-emerald-100 text-emerald-700'">
-          {{ pos.pendingCount ? `${pos.pendingCount} 項待送廚` : '已全部送廚' }}
-        </span>
-        <button class="btn-ghost btn-sm" @click="router.push('/tables')">桌台視圖</button>
-        <button class="btn-ghost btn-sm !text-brand-600 !border-brand-300" :disabled="!pos.pendingCount || submitting" @click="submitOrder">
-          🥘 下單（送廚房）
-        </button>
-        <button class="btn-ghost btn-sm" :disabled="!pos.hasServerOrder" @click="reprintTicket">廚房單補印</button>
-        <button class="btn-ghost btn-sm" :disabled="!pos.items.length || pos.hasServerOrder" @click="holdOrder">掛單</button>
-        <button class="btn-ghost btn-sm" @click="heldModal = true">取單（{{ pos.heldOrders.length }}）</button>
-        <button class="btn-ghost btn-sm" @click="openOrders">今日訂單</button>
-        <button v-if="pos.tableId" class="btn-ghost btn-sm" @click="moveModal = true">換桌</button>
-        <button v-if="pos.hasServerOrder && auth.isManager" class="btn-ghost btn-sm !text-red-500" @click="voidModal = true">作廢</button>
+      <!-- 工具列：單據狀態 / 輔助操作 / 主要動作 -->
+      <div class="bg-white border-b border-gray-200 px-4 py-2.5 flex items-center gap-2 flex-wrap shrink-0 shadow-[0_1px_0_rgba(0,0,0,0.02)]">
+        <!-- 左：目前單據狀態 -->
+        <div class="flex items-center gap-2 pr-3 mr-1 border-r border-gray-200">
+          <span
+            class="chip !gap-1.5 !px-3 !py-1 !text-[13px]"
+            :class="pos.tableId ? 'bg-brand-100 text-brand-700' : pos.hasServerOrder ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-600'"
+          >
+            <span class="ico">{{ pos.tableId ? '🪑' : '🥡' }}</span>
+            <template v-if="pos.tableId">桌台 {{ pos.tableNumber }} · {{ pos.orderNo }}</template>
+            <template v-else-if="pos.hasServerOrder">外帶 / 快餐 · {{ pos.orderNo }}</template>
+            <template v-else>快餐模式（未開台）</template>
+          </span>
+          <span
+            v-if="pos.hasServerOrder"
+            class="chip !gap-1.5 !px-3 !py-1 !text-[13px]"
+            :class="pos.pendingCount ? 'bg-gray-100 text-gray-500' : 'bg-emerald-100 text-emerald-700'"
+          >
+            <span class="ico">{{ pos.pendingCount ? '⏳' : '✅' }}</span>
+            {{ pos.pendingCount ? `${pos.pendingCount} 項待送廚` : '已全部送廚' }}
+          </span>
+        </div>
+
+        <!-- 中：輔助操作 -->
+        <div class="flex items-center gap-2">
+          <button class="btn-ghost btn-sm" @click="router.push('/tables')"><span class="ico">🪑</span>桌台視圖</button>
+          <button class="btn-ghost btn-sm" @click="openOrders"><span class="ico">🧾</span>今日訂單</button>
+          <button v-if="pos.tableId" class="btn-ghost btn-sm" @click="moveModal = true"><span class="ico">🔄</span>換桌</button>
+          <button v-if="pos.hasServerOrder && auth.isManager" class="btn-ghost btn-sm !text-red-500 hover:!bg-red-50" @click="voidModal = true"><span class="ico">🚫</span>作廢</button>
+        </div>
+
         <div class="flex-1" />
-        <span class="chip bg-amber-100 text-amber-700">🕐 {{ slotRuleText(nowSlot) }}</span>
-        <span v-if="catalog.serviceRate > 0" class="chip bg-amber-100 text-amber-700">服務費 {{ catalog.serviceRate }}%</span>
+
+        <!-- 右：時段資訊 + 主要動作 -->
+        <span class="chip !gap-1.5 !px-3 !py-1 !text-[13px] bg-amber-100 text-amber-700"><span class="ico">🕐</span>{{ slotRuleText(nowSlot) }}</span>
+        <span v-if="catalog.serviceRate > 0" class="chip !gap-1.5 !px-3 !py-1 !text-[13px] bg-amber-100 text-amber-700"><span class="ico">💁</span>服務費 {{ catalog.serviceRate }}%</span>
+        <button class="btn-ghost btn-sm" :disabled="!pos.hasServerOrder" @click="reprintTicket"><span class="ico">🖨️</span>廚房單補印</button>
+        <button
+          class="btn-primary btn-sm !px-4 !py-2 !text-sm"
+          :disabled="!pos.pendingCount || submitting"
+          @click="submitOrder"
+        >
+          <span class="ico">🥘</span>{{ submitting ? '送廚中…' : '下單（送廚房）' }}
+        </button>
       </div>
 
       <!-- 分類 -->
@@ -572,7 +556,7 @@ const cashShort = computed(() => pos.paymentMethod === 'cash' && pos.received > 
             :class="pos.paymentMethod === pm.code ? 'border-brand-500 bg-brand-50' : 'border-gray-200'"
             @click="pos.setPayment(pm.code)"
           >
-            <div class="text-xl">{{ paymentMeta(pm.code).icon }}</div>
+            <div class="ico-lg mx-auto">{{ paymentMeta(pm.code).icon }}</div>
             <div class="text-xs font-bold mt-0.5">{{ pm.name }}</div>
             <div v-if="Number(pm.fee_rate) > 0" class="text-[10px] text-gray-400">費率{{ (pm.fee_rate * 100).toFixed(1) }}%</div>
           </button>
@@ -734,25 +718,6 @@ const cashShort = computed(() => pos.paymentMethod === 'cash' && pos.received > 
       </template>
     </Modal>
 
-    <!-- ============ 掛單列表 ============ -->
-    <Modal v-model="heldModal" title="掛單 / 取單" width="max-w-md">
-      <div v-if="!pos.heldOrders.length" class="text-center text-gray-300 py-8">目前沒有掛單</div>
-      <div v-else class="space-y-2">
-        <div
-          v-for="o in pos.heldOrders"
-          :key="o.id"
-          class="flex items-center gap-3 rounded-xl border border-gray-200 px-4 py-3"
-        >
-          <div class="flex-1">
-            <div class="font-bold text-sm">{{ o.order_no }}</div>
-            <div class="text-xs text-gray-400">{{ fmtTime(o.created_at) }} · {{ o.item_count }} 件 · {{ fmtMoney(o.total_amount, catalog.currency) }}</div>
-          </div>
-          <button class="btn-primary btn-sm" @click="resumeHeld(o)">取單</button>
-          <button class="btn-ghost btn-sm !text-red-500" @click="api.del(`/orders/${o.id}`).then(() => { pos.loadHeld(); toast.success('掛單已刪除'); }).catch((e) => toast.error(e.message))">刪除</button>
-        </div>
-      </div>
-    </Modal>
-
     <!-- ============ 今日訂單 ============ -->
     <Modal v-model="ordersModal" title="今日訂單" width="max-w-2xl">
       <div class="space-y-2">
@@ -784,7 +749,6 @@ const cashShort = computed(() => pos.paymentMethod === 'cash' && pos.received > 
             <div class="flex gap-2 pt-1">
               <button v-if="o.status === 'open' && o.table_id" class="btn-primary btn-sm" @click="continueOrder(o)">繼續點餐</button>
               <button v-if="o.status === 'open'" class="btn-ghost btn-sm !text-red-500" @click="voidOrderRow(o)">作廢</button>
-              <button v-if="o.status === 'held'" class="btn-ghost btn-sm !text-red-500" @click="deleteHeldRow(o)">刪除掛單</button>
             </div>
           </div>
         </div>
