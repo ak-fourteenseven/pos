@@ -3,3 +3,7 @@ dist/
 server/data/
 *.log
 .DS_Store
+
+# UAT 打包產物（pos.exe 體積大，不入庫）
+pos-uat/
+uat-build/

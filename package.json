@@ -10,11 +10,14 @@
     "client": "npm --prefix client run dev",
     "admin": "npm --prefix admin run dev",
     "build": "npm --prefix client run build && npm --prefix admin run build",
+    "build:uat": "node scripts/package-uat.mjs",
     "start": "npm --prefix server start",
     "test:e2e": "node tests/e2e/wizard-close.test.js && node tests/e2e/submit-flow.test.js && node tests/e2e/admin.test.js"
   },
   "devDependencies": {
     "concurrently": "^9.1.2",
-    "playwright-core": "^1.64.1"
+    "esbuild": "^0.24.0",
+    "playwright-core": "^1.64.1",
+    "postject": "^1.0.0-alpha.6"
   }
 }

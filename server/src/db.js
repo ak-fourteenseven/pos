@@ -8,7 +8,14 @@ const fs = require('node:fs');
 const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
 
-const DATA_DIR = path.join(__dirname, '..', 'data');
+/* 資料目錄：
+ * - 開發模式：server/data
+ * - 打包模式（Node SEA 單一執行檔）：exe 同層的 data 資料夾，方便整包搬遷與備份
+ * - 可用環境變數 POS_DATA_DIR 覆蓋 */
+let isSea = false;
+try { isSea = require('node:sea').isSea(); } catch { /* 舊版 Node 無此模組，忽略 */ }
+const DATA_DIR = process.env.POS_DATA_DIR
+  || (isSea ? path.join(path.dirname(process.execPath), 'data') : path.join(__dirname, '..', 'data'));
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 const DB_PATH = path.join(DATA_DIR, 'pos.db');
 

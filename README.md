@@ -63,6 +63,29 @@ npm run dev
 - **報表統計**：日結單、月報表（每日趨勢）、菜品銷量排行 + ABC 分析、支付方式佔比、時段分佈、交接班報表，支援匯出 CSV / Excel。
 - **系統維護**：一鍵備份（自訂資料夾或伺服器預備份目錄）、下載資料庫、還原備份、資料庫資訊。
 
+## UAT 打包（Windows 單一執行檔）
+
+```bash
+npm install        # 安裝打包依賴（esbuild / postject）
+npm run build:uat
+```
+
+產出 `pos-uat/` 資料夾（約 91MB，已加入 .gitignore 不入庫）：
+
+```
+pos-uat/
+├── pos.exe        # 單一執行檔：內含 Node 運行時 + 服務端 + 全部依賴
+├── public/client  # 前台收銀頁面（http://localhost:3001）
+├── public/admin   # 後台管理頁面（http://localhost:3001/admin，以 /admin/ 前綴構建）
+├── 啟動POS.bat    # 一鍵啟動並自動開瀏覽器
+├── README-UAT.txt # 部署說明
+└── data/          # SQLite 資料庫（首次運行自動建立，隨資料夾整包遷移）
+```
+
+*   打包流程（`scripts/package-uat.mjs`）：前端構建 → **esbuild** 把服務端與依賴打包為單檔 bundle → **Node SEA** 把 bundle 注入 `node.exe` 生成 `pos.exe`（SEA fuse 哨兵從二進位自動偵測，相容 Node 20/22/24）。
+*   運行時無需安裝 Node；資料庫落在 exe 同層 `data/`（可用 `POS_DATA_DIR` 覆蓋），換埠在 bat 內加 `set PORT=8080`。
+*   服務端同時支援開發模式靜態託管（`client/dist` 根路徑 + `admin/dist` 於 `/admin`）與打包模式（exe 同層 `public/`）。
+
 ## 目錄結構
 
 ```

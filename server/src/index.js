@@ -849,11 +849,24 @@ app.get('/api/system/info', (req, res) => {
   });
 });
 
-/* ================= 靜態託管（production：npm run build 後由本服務器提供前端） ================= */
-const distDir = path.join(__dirname, '..', 'client', 'dist');
-if (fs.existsSync(distDir)) {
-  app.use(express.static(distDir));
-  app.get(/^(?!\/api).*/, (req, res) => res.sendFile(path.join(distDir, 'index.html')));
+/* ================= 靜態託管 =================
+ * 開發模式：npm run build 後提供 client/dist（根路徑）與 admin/dist（/admin 前綴）
+ * 打包模式（Node SEA）：exe 同層的 public/client 與 public/admin */
+function resolveStaticDir(devRelative, packagedRelative) {
+  const candidates = [path.join(__dirname, devRelative), path.join(__dirname, packagedRelative)];
+  return candidates.find((p) => fs.existsSync(p)) || null;
+}
+const clientDist = resolveStaticDir('../../client/dist', 'public/client');
+const adminDist = resolveStaticDir('../../admin/dist', 'public/admin');
+if (adminDist) {
+  app.use('/admin', express.static(adminDist));
+  /* 後台 SPA 路由回退（/admin/* 非靜態資源時回 index.html） */
+  app.get(/^\/admin($|\/).*/, (req, res) => res.sendFile(path.join(adminDist, 'index.html')));
+}
+if (clientDist) {
+  app.use(express.static(clientDist));
+  /* 前台 SPA 路由回退（排除 API 與 /admin） */
+  app.get(/^(?!\/api|\/admin).*/, (req, res) => res.sendFile(path.join(clientDist, 'index.html')));
 }
 
 app.use((req, res) => {
