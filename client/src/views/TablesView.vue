@@ -5,7 +5,7 @@ import { api } from '@shared/api';
 import { useCatalogStore } from '@shared/stores/catalog';
 import { usePosStore } from '../stores/pos';
 import { useToastStore } from '@shared/stores/toast';
-import { fmtMoney, fmtTime, TABLE_STATUS } from '@shared/utils/format';
+import { fmtMoney, TABLE_STATUS } from '@shared/utils/format';
 
 const catalog = useCatalogStore();
 const pos = usePosStore();
@@ -136,51 +136,40 @@ async function doMerge() {
     </div>
 
     <!-- 桌台看板 -->
-    <div v-for="[area, list] in areas" :key="area" class="mb-6">
-      <h2 class="text-sm font-extrabold text-gray-500 mb-3">{{ area }}</h2>
-      <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3">
+    <div v-for="[area, list] in areas" :key="area" class="mb-5">
+      <h2 class="text-xs font-extrabold text-gray-500 mb-2">{{ area }}（{{ list.length }} 桌）</h2>
+      <div class="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-9 xl:grid-cols-10 gap-2">
         <div
           v-for="t in list"
           :key="t.id"
-          class="card p-4 border-2 transition"
+          class="rounded-lg border-2 px-2 py-1.5 transition cursor-pointer"
           :class="[
             TABLE_STATUS[t.status]?.cls,
-            mergeMode && (t.status === 'occupied' || t.status === 'preparing') ? 'cursor-pointer hover:shadow-md' : '',
-            mergeSelected.includes(t.id) ? 'ring-4 ring-brand-300' : '',
+            mergeMode && (t.status === 'occupied' || t.status === 'preparing') ? 'hover:shadow-md' : '',
+            mergeSelected.includes(t.id) ? 'ring-2 ring-brand-400' : '',
           ]"
           @click="mergeMode && (t.status === 'occupied' || t.status === 'preparing') && toggleMergeSelect(t)"
         >
           <div class="flex items-center justify-between">
-            <span class="text-xl font-extrabold">{{ t.table_number }}</span>
-            <span class="chip" :class="TABLE_STATUS[t.status]?.cls">{{ TABLE_STATUS[t.status]?.label }}</span>
+            <span class="text-sm font-extrabold">{{ t.table_number }}</span>
+            <span class="w-1.5 h-1.5 rounded-full shrink-0" :class="TABLE_STATUS[t.status]?.dot" />
           </div>
-          <div class="text-xs text-gray-400 mt-1">{{ t.capacity }} 人桌</div>
+          <div class="text-[10px] text-gray-400 leading-tight">{{ t.capacity }}人</div>
 
           <template v-if="t.status === 'occupied' || t.status === 'preparing'">
-            <div class="mt-2 text-sm font-bold">{{ fmtMoney(t.total_amount || 0, catalog.currency) }}</div>
-            <div class="text-xs text-gray-400">
-              {{ t.item_count }} 件 · {{ fmtTime(t.opened_at) }} {{ t.status === 'preparing' ? '送廚' : '開台' }}
-            </div>
-            <div class="mt-2 flex gap-2">
-              <button class="btn-primary btn-sm flex-1" @click.stop="continueOrder(t)">
-                {{ t.status === 'preparing' ? '繼續點餐 / 結賬' : '繼續點餐' }}
-              </button>
-            </div>
+            <div class="text-xs font-bold mt-0.5">{{ fmtMoney(t.total_amount || 0, catalog.currency) }}</div>
+            <button class="btn-primary btn-xs w-full mt-1 !py-1 !text-[10px] !rounded-md" @click.stop="continueOrder(t)">
+              {{ t.status === 'preparing' ? '點餐/結賬' : '點餐' }}
+            </button>
           </template>
           <template v-else-if="t.status === 'available'">
-            <div class="mt-3">
-              <button class="btn-ghost btn-sm w-full" @click="openTable(t)">開台</button>
-            </div>
+            <button class="btn-ghost btn-xs w-full mt-1 !py-1 !text-[10px] !rounded-md" @click.stop="openTable(t)">開台</button>
           </template>
           <template v-else-if="t.status === 'cleaning'">
-            <div class="mt-3">
-              <button class="btn-ghost btn-sm w-full" @click="clearTable(t)">清台完成</button>
-            </div>
+            <button class="btn-ghost btn-xs w-full mt-1 !py-1 !text-[10px] !rounded-md" @click.stop="clearTable(t)">清台</button>
           </template>
           <template v-else>
-            <div class="mt-3">
-              <button class="btn-ghost btn-sm w-full" @click="cancelReserve(t)">取消預訂</button>
-            </div>
+            <button class="btn-ghost btn-xs w-full mt-1 !py-1 !text-[10px] !rounded-md" @click.stop="cancelReserve(t)">取消預訂</button>
           </template>
         </div>
       </div>

@@ -252,5 +252,15 @@ export const usePosStore = defineStore('pos', {
       await api.post(`/orders/${this.orderId}/void`);
       this.reset();
     },
+    /** 分單：把選中明細拆到新訂單，可指定目標桌台 */
+    async splitOrder(itemIds, tableId = null) {
+      if (!this.orderId) throw new Error('尚未開單，無法分單');
+      const res = await api.post(`/orders/${this.orderId}/split`, {
+        item_ids: itemIds,
+        table_id: tableId,
+      });
+      this.items = res.original.items.map((it) => this.mapItem(it));
+      return res.new_order;
+    },
   },
 });

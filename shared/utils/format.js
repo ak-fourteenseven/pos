@@ -64,6 +64,7 @@ export const ORDER_STATUS = {
   held: { label: '掛單', cls: 'bg-amber-100 text-amber-700' },
   completed: { label: '已結帳', cls: 'bg-emerald-100 text-emerald-700' },
   voided: { label: '已作廢', cls: 'bg-red-100 text-red-700' },
+  refunded: { label: '已退款', cls: 'bg-orange-100 text-orange-700' },
 };
 
 export const QUICK_REMARKS = ['去冰', '少冰', '微冰', '常溫', '熱', '無糖', '微糖', '半糖', '少糖', '全糖',

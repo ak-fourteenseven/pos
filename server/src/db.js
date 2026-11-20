@@ -265,9 +265,10 @@ function seed() {
   P(5, '布朗尼', 65, '🍫', '#451a03');
 
   const insertTable = d.prepare('INSERT INTO tables (table_number, area, capacity) VALUES (?, ?, ?)');
-  for (let i = 1; i <= 6; i++) insertTable.run(`A${i}`, '大廳', 4);
-  for (let i = 1; i <= 4; i++) insertTable.run(`B${i}`, '包廂', i <= 2 ? 8 : 10);
-  for (let i = 1; i <= 2; i++) insertTable.run(`C${i}`, '戶外陽台', 2);
+  for (let i = 1; i <= 18; i++) insertTable.run(`A${i}`, '大廳', 4);
+  for (let i = 1; i <= 18; i++) insertTable.run(`B${i}`, '包廂', 4);
+  for (let i = 1; i <= 10; i++) insertTable.run(`KP${i}`, 'keepta 外賣區', 4);
+  for (let i = 1; i <= 10; i++) insertTable.run(`FP${i}`, 'foodpanda 外賣區', 4);
 }
 
 /* ---------------- 遷移：為既有資料庫補欄位 ---------------- */
@@ -282,6 +283,9 @@ function migrate() {
   add('products', 'skip_group', 'skip_group TEXT');
   add('order_items', 'item_type', "item_type TEXT DEFAULT 'simple'");
   add('order_items', 'options', 'options TEXT');
+  add('orders', 'refunded_at', 'refunded_at TEXT');
+  add('orders', 'refund_reason', 'refund_reason TEXT');
+  add('orders', 'refunded_by', 'refunded_by INTEGER');
   add('order_items', 'sent_at', 'sent_at DATETIME');
   add('orders', 'ordered_at', 'ordered_at DATETIME');
   add('orders', 'submit_count', 'submit_count INTEGER DEFAULT 0');

@@ -11,7 +11,7 @@ import ComboWizard from '../components/ComboWizard.vue';
 import DrinkModal from '../components/DrinkModal.vue';
 import KitchenTicketModal from '../components/KitchenTicketModal.vue';
 import {
-  fmtMoney, fmtTime, hexA, PAYMENT_META, ORDER_STATUS, QUICK_REMARKS, today,
+  fmtMoney, hexA, PAYMENT_META, QUICK_REMARKS,
 } from '@shared/utils/format';
 import { currentSlot, modifiersSum, slotRuleText } from '@shared/utils/pricing';
 
@@ -59,13 +59,11 @@ const specForm = ref({ product: null, qty: 1, spec: '', remark: '', editing: nul
 const discountModal = ref(false);
 const discountForm = ref({ mode: 'rate', rate: 95, amount: 0 });
 
-const ordersModal = ref(false);
-const todayOrders = ref([]);
-const ordersDetail = ref(null);
-
 const moveModal = ref(false);
 const receipt = ref(null);
 const voidModal = ref(false);
+const splitModal = ref(false);
+const splitForm = ref({ selectedIds: [], tableId: null });
 const wizardProduct = ref(null);
 const drinkProduct = ref(null);
 const receiptTab = ref('customer');
@@ -191,49 +189,6 @@ function applyDiscount() {
   discountModal.value = false;
 }
 
-/* ---------------- 今日訂單 ---------------- */
-async function openOrders() {
-  try {
-    todayOrders.value = await api.get(`/orders?date=${today()}&limit=100`);
-    ordersDetail.value = null;
-    ordersModal.value = true;
-  } catch (e) {
-    toast.error(e.message);
-  }
-}
-async function showOrderDetail(o) {
-  if (ordersDetail.value && ordersDetail.value.id === o.id) {
-    ordersDetail.value = null;
-    return;
-  }
-  try {
-    ordersDetail.value = await api.get(`/orders/${o.id}`);
-  } catch (e) {
-    toast.error(e.message);
-  }
-}
-async function continueOrder(o) {
-  try {
-    const full = await api.get(`/orders/${o.id}`);
-    pos.bindOrder(full, o.table_number || '');
-    ordersModal.value = false;
-    toast.success(`已載入訂單 ${full.order_no}`);
-  } catch (e) {
-    toast.error(e.message);
-  }
-}
-async function voidOrderRow(o) {
-  if (!confirm(`確定作廢訂單 ${o.order_no}？此操作無法復原。`)) return;
-  try {
-    await api.post(`/orders/${o.id}/void`);
-    todayOrders.value = await api.get(`/orders?date=${today()}&limit=100`);
-    ordersDetail.value = null;
-    toast.success('訂單已作廢');
-  } catch (e) {
-    toast.error(e.message);
-  }
-}
-
 /* ---------------- 換桌 ---------------- */
 const availableTables = computed(() => catalog.tables.filter((t) => t.status === 'available'));
 async function moveToTable(t) {
@@ -318,6 +273,34 @@ function afterReceipt() {
   receiptTab.value = 'customer';
 }
 
+/* ---------------- 分單 ---------------- */
+const splitTargetTables = computed(() => catalog.tables.filter((t) => t.status === 'available' && t.id !== pos.tableId));
+function openSplit() {
+  splitForm.value = { selectedIds: [], tableId: null };
+  splitModal.value = true;
+}
+function toggleSplitItem(id) {
+  const idx = splitForm.value.selectedIds.indexOf(id);
+  if (idx >= 0) splitForm.value.selectedIds.splice(idx, 1);
+  else splitForm.value.selectedIds.push(id);
+}
+const splitSelectedItems = computed(() => pos.items.filter((it) => splitForm.value.selectedIds.includes(it.id)));
+const splitSelectedTotal = computed(() => splitSelectedItems.value.reduce((s, it) => s + it.price * it.qty, 0));
+async function confirmSplit() {
+  if (!splitForm.value.selectedIds.length) {
+    toast.error('請選擇要分出的菜品');
+    return;
+  }
+  try {
+    const newOrder = await pos.splitOrder(splitForm.value.selectedIds, splitForm.value.tableId);
+    splitModal.value = false;
+    await catalog.reloadTables();
+    toast.success(`已分單：${splitSelectedItems.value.length} 項分出至新訂單 ${newOrder.order_no}`);
+  } catch (e) {
+    toast.error(e.message);
+  }
+}
+
 /** 飲品時段優惠金額（顧客單顯示：原價 $X，優惠 −$Y） */
 function drinkSaving(it) {
   let o = it.options;
@@ -399,8 +382,8 @@ const cashShort = computed(() => pos.paymentMethod === 'cash' && pos.received > 
         <!-- 中：輔助操作 -->
         <div class="flex items-center gap-2">
           <button class="btn-ghost btn-sm" @click="router.push('/tables')"><span class="ico">🪑</span>桌台視圖</button>
-          <button class="btn-ghost btn-sm" @click="openOrders"><span class="ico">🧾</span>今日訂單</button>
           <button v-if="pos.tableId" class="btn-ghost btn-sm" @click="moveModal = true"><span class="ico">🔄</span>換桌</button>
+          <button v-if="pos.hasServerOrder && pos.items.length > 1" class="btn-ghost btn-sm" @click="openSplit"><span class="ico">✂️</span>分單</button>
           <button v-if="pos.hasServerOrder && auth.isManager" class="btn-ghost btn-sm !text-red-500 hover:!bg-red-50" @click="voidModal = true"><span class="ico">🚫</span>作廢</button>
         </div>
 
@@ -718,44 +701,6 @@ const cashShort = computed(() => pos.paymentMethod === 'cash' && pos.received > 
       </template>
     </Modal>
 
-    <!-- ============ 今日訂單 ============ -->
-    <Modal v-model="ordersModal" title="今日訂單" width="max-w-2xl">
-      <div class="space-y-2">
-        <div
-          v-for="o in todayOrders"
-          :key="o.id"
-          class="rounded-xl border border-gray-200 overflow-hidden"
-        >
-          <button class="w-full flex items-center gap-3 px-4 py-3 hover:bg-gray-50 text-left" @click="showOrderDetail(o)">
-            <span class="chip" :class="ORDER_STATUS[o.status]?.cls">{{ ORDER_STATUS[o.status]?.label }}</span>
-            <span class="font-bold text-sm">{{ o.order_no }}</span>
-            <span class="text-xs text-gray-400">{{ fmtTime(o.created_at) }}</span>
-            <span class="text-xs text-gray-400">{{ o.table_number ? `桌台 ${o.table_number}` : '快餐' }}</span>
-            <div class="flex-1" />
-            <span class="font-extrabold text-brand-600">{{ fmtMoney(o.pay_amount || o.total_amount, catalog.currency) }}</span>
-          </button>
-          <div v-if="ordersDetail && ordersDetail.id === o.id" class="border-t border-gray-100 bg-gray-50 px-4 py-3 space-y-2">
-            <div v-for="it in ordersDetail.items" :key="it.id" class="text-sm">
-              <div class="flex justify-between">
-                <span>{{ it.product_name }}<span v-if="it.spec">[{{ it.spec }}]</span> ×{{ it.quantity }}<span v-if="it.remark" class="text-gray-400">（{{ it.remark }}）</span></span>
-                <span class="text-gray-500">{{ fmtMoney(it.price * it.quantity, catalog.currency) }}</span>
-              </div>
-              <div v-for="(line, i) in optionLines(it)" :key="i" class="text-xs text-gray-400 pl-2">{{ line }}</div>
-            </div>
-            <div class="flex justify-between text-sm pt-1 border-t border-gray-200">
-              <span class="text-gray-500">支付：{{ paymentMeta(ordersDetail.payment_method).label || '—' }}</span>
-              <span class="font-bold">合計 {{ fmtMoney(ordersDetail.pay_amount || ordersDetail.total_amount, catalog.currency) }}</span>
-            </div>
-            <div class="flex gap-2 pt-1">
-              <button v-if="o.status === 'open' && o.table_id" class="btn-primary btn-sm" @click="continueOrder(o)">繼續點餐</button>
-              <button v-if="o.status === 'open'" class="btn-ghost btn-sm !text-red-500" @click="voidOrderRow(o)">作廢</button>
-            </div>
-          </div>
-        </div>
-        <div v-if="!todayOrders.length" class="text-center text-gray-300 py-8">今日尚無訂單</div>
-      </div>
-    </Modal>
-
     <!-- ============ 換桌 ============ -->
     <Modal v-model="moveModal" title="換桌" width="max-w-md">
       <p class="text-sm text-gray-500 mb-3">目前桌台：<b class="text-gray-800">{{ pos.tableNumber }}</b>，請選擇空閒桌台：</p>
@@ -781,6 +726,75 @@ const cashShort = computed(() => pos.paymentMethod === 'cash' && pos.received > 
       <template #footer>
         <button class="btn-ghost" @click="voidModal = false">取消</button>
         <button class="btn-danger" @click="voidOrder">確定作廢</button>
+      </template>
+    </Modal>
+
+    <!-- ============ 分單 ============ -->
+    <Modal v-model="splitModal" title="分單" width="max-w-lg">
+      <div class="space-y-4">
+        <p class="text-sm text-gray-500">勾選要分出到新訂單的菜品（整個套餐將一併分出）：</p>
+        <div class="space-y-1 max-h-72 overflow-y-auto">
+          <label
+            v-for="item in pos.items"
+            :key="item.id"
+            class="flex items-start gap-3 px-3 py-2.5 rounded-xl border-2 cursor-pointer transition"
+            :class="splitForm.selectedIds.includes(item.id) ? 'border-brand-500 bg-brand-50' : 'border-gray-100 hover:border-gray-200'"
+          >
+            <input
+              type="checkbox"
+              class="mt-1 w-4 h-4 accent-brand-500"
+              :checked="splitForm.selectedIds.includes(item.id)"
+              @change="toggleSplitItem(item.id)"
+            />
+            <div class="flex-1 min-w-0">
+              <div class="font-bold text-sm text-gray-800 truncate">
+                {{ item.name }}
+                <span v-if="item.item_type === 'combo'" class="chip bg-brand-100 text-brand-700 text-[10px] ml-1">套餐</span>
+                <span v-if="item.sent" class="chip bg-emerald-100 text-emerald-700 text-[10px] ml-1">已送廚</span>
+              </div>
+              <div v-for="(line, i) in optionLines(item)" :key="i" class="text-xs text-gray-400 truncate">{{ line }}</div>
+            </div>
+            <div class="text-right shrink-0">
+              <div class="font-extrabold text-sm text-brand-600">{{ fmtMoney(item.price * item.qty, catalog.currency) }}</div>
+              <div class="text-xs text-gray-400">×{{ item.qty }}</div>
+            </div>
+          </label>
+        </div>
+
+        <div>
+          <div class="label">分出至桌台（可不選，作為外帶/快餐）</div>
+          <div class="flex flex-wrap gap-2">
+            <button
+              class="chip border transition"
+              :class="splitForm.tableId === null ? 'bg-brand-500 text-white border-brand-500' : 'bg-white text-gray-500 border-gray-300'"
+              @click="splitForm.tableId = null"
+            >
+              外帶 / 快餐
+            </button>
+            <button
+              v-for="t in splitTargetTables"
+              :key="t.id"
+              class="chip border transition"
+              :class="splitForm.tableId === t.id ? 'bg-brand-500 text-white border-brand-500' : 'bg-white text-gray-500 border-gray-300'"
+              @click="splitForm.tableId = t.id"
+            >
+              🪑 {{ t.table_number }}
+            </button>
+          </div>
+          <div v-if="!splitTargetTables.length" class="text-xs text-gray-400 mt-1">目前無空閒桌台</div>
+        </div>
+
+        <div class="bg-gray-50 rounded-xl px-4 py-3 flex justify-between items-center">
+          <div>
+            <div class="text-xs text-gray-400">已選 {{ splitForm.selectedIds.length }} 項</div>
+            <div class="font-extrabold text-brand-600 text-lg">{{ fmtMoney(splitSelectedTotal, catalog.currency) }}</div>
+          </div>
+          <div class="text-xs text-gray-400">原單保留 {{ pos.items.length - splitForm.selectedIds.length }} 項</div>
+        </div>
+      </div>
+      <template #footer>
+        <button class="btn-ghost" @click="splitModal = false">取消</button>
+        <button class="btn-primary" :disabled="!splitForm.selectedIds.length" @click="confirmSplit">確認分單</button>
       </template>
     </Modal>
 

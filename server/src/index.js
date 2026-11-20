@@ -401,6 +401,50 @@ app.post('/api/tables/:id/open', (req, res) => {
   db.prepare("UPDATE tables SET status = 'occupied', current_order_id = ? WHERE id = ?").run(orderId, t.id);
   ok(res, orderWithItems(db, orderId));
 });
+/** 分單：把選中的明細拆到新訂單（可選指定目標桌台） */
+app.post('/api/orders/:id/split', (req, res) => {
+  const db = getDb();
+  const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
+  if (!order) return fail(res, '訂單不存在', 404);
+  if (order.status !== 'open' && order.status !== 'ordered') return fail(res, '訂單狀態不可分單');
+  const { item_ids, table_id } = req.body || {};
+  if (!item_ids || !Array.isArray(item_ids) || !item_ids.length) return fail(res, '請選擇要分出的菜品');
+  const selectedIds = item_ids.map(Number);
+  const allItems = db.prepare('SELECT * FROM order_items WHERE order_id = ?').all(order.id);
+  const toMove = allItems.filter((it) => selectedIds.includes(it.id));
+  if (toMove.length !== selectedIds.length) return fail(res, '部分菜品不存在於此訂單');
+  if (toMove.length === allItems.length) return fail(res, '不可分出全部菜品，請至少保留一項');
+  // 目標桌台校驗
+  if (table_id) {
+    const t = db.prepare('SELECT * FROM tables WHERE id = ?').get(table_id);
+    if (!t) return fail(res, '目標桌台不存在', 404);
+    if (t.status === 'occupied' || t.status === 'preparing') return fail(res, '目標桌台已在用餐中');
+    if (order.table_id && Number(table_id) === order.table_id) return fail(res, '目標桌台不能是當前桌台');
+  }
+  const newOrderNo = genOrderNo(db);
+  const r = db.prepare(`INSERT INTO orders (order_no, table_id, status, remark, cashier_id)
+    VALUES (?, ?, 'open', '分單', ?)`).run(newOrderNo, table_id || null, req.user.id);
+  const newOrderId = Number(r.lastInsertRowid);
+  db.exec('BEGIN');
+  try {
+    for (const it of toMove) {
+      db.prepare('UPDATE order_items SET order_id = ? WHERE id = ?').run(newOrderId, it.id);
+    }
+    recomputeOrderTotal(db, order.id);
+    recomputeOrderTotal(db, newOrderId);
+    if (table_id) {
+      db.prepare("UPDATE tables SET status = 'occupied', current_order_id = ? WHERE id = ?").run(newOrderId, table_id);
+    }
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    return fail(res, '分單失敗：' + e.message);
+  }
+  ok(res, {
+    original: orderWithItems(db, order.id),
+    new_order: orderWithItems(db, newOrderId),
+  });
+});
 /** 併桌：把 from 的訂單（含明細）併入 to */
 app.post('/api/tables/merge', (req, res) => {
   const { from_id, to_id } = req.body || {};
@@ -621,6 +665,17 @@ app.post('/api/orders/:id/void', managerOnly, (req, res) => {
   db.prepare("UPDATE orders SET status = 'voided' WHERE id = ?").run(order.id);
   if (order.table_id) freeTable(db, order.table_id, 'cleaning');
   ok(res, { updated: true });
+});
+/** 退款（店長）：對已結帳訂單進行退款 */
+app.post('/api/orders/:id/refund', managerOnly, (req, res) => {
+  const db = getDb();
+  const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
+  if (!order) return fail(res, '訂單不存在', 404);
+  if (order.status !== 'completed') return fail(res, '僅已結帳訂單可退款');
+  const { reason } = req.body || {};
+  db.prepare(`UPDATE orders SET status = 'refunded', refunded_at = ?, refund_reason = ?, refunded_by = ?
+    WHERE id = ?`).run(nowStr(), reason || null, req.user.id, order.id);
+  ok(res, { updated: true, refunded_amount: order.pay_amount });
 });
 /** 刪除掛單 */
 app.delete('/api/orders/:id', (req, res) => {
