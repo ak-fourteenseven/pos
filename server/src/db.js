@@ -203,12 +203,12 @@ CREATE TABLE IF NOT EXISTS time_slots (
 
 /* ---------------- 種子資料 ---------------- */
 const DEFAULT_SETTINGS = {
-  store_name: '時光餐飲館',
-  store_address: '臺北市大安區復興南路一段 100 號',
+  store_name: '新貴香園',
+  store_address: '香港新界荃灣區享和街51號地下E號舖都城大樓',
   store_phone: '02-2345-6789',
   receipt_footer: '謝謝光臨，歡迎再來！',
   service_fee_rate: '0',
-  currency: 'NT$',
+  currency: 'HKD$',
   business_mode: 'table',
 };
 
