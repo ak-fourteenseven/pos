@@ -8,7 +8,7 @@ import BarChart from '../components/charts/BarChart.vue';
 import LineChart from '../components/charts/LineChart.vue';
 import DonutChart from '../components/charts/DonutChart.vue';
 import { downloadCSV, downloadExcel } from '../utils/export';
-import { fmtDateTime, fmtMoney, fmtNum, fmtPct, thisMonth, today } from '@shared/utils/format';
+import { fmtDateTime, fmtMoney, fmtNum, fmtPct, thisMonth, today, PAYMENT_META } from '@shared/utils/format';
 
 const catalog = useCatalogStore();
 const shift = useShiftStore();
@@ -29,11 +29,12 @@ async function loadDaily() {
   }
 }
 
-const PAYMENT_COLORS = { cash: '#f59e0b', mobile: '#10b981', card: '#3b82f6', credit: '#8b5cf6' };
+const PAYMENT_COLORS = { cash: '#f59e0b', alipay: '#10b981', octopus: '#f97316', card: '#3b82f6', credit: '#8b5cf6' };
+const payName = (code) => PAYMENT_META[code]?.label || code;
 
 const paymentDonut = computed(() =>
   (daily.value?.by_payment || []).map((p) => ({
-    label: p.method,
+    label: payName(p.method),
     value: p.amount,
     color: PAYMENT_COLORS[p.method] || '#9ca3af',
   })),
@@ -51,9 +52,11 @@ function exportDailyCSV() {
     ['折扣合計', d.discount_total],
     ['服務費合計', d.service_total],
     ['作廢訂單數', d.void_count],
+    ['退款筆數', d.refund_count || 0],
+    ['退款金額', d.refund_amount || 0],
     [],
     ['支付方式', '筆數', '金額'],
-    ...d.by_payment.map((p) => [p.method, p.cnt, p.amount]),
+    ...d.by_payment.map((p) => [payName(p.method), p.cnt, p.amount]),
     [],
     ['時段', '筆數', '金額'],
     ...d.by_hour.map((h) => [`${h.hour}:00`, h.cnt, h.amount]),
@@ -72,8 +75,8 @@ async function exportDailyExcel() {
   if (!daily.value) return;
   const d = daily.value;
   await downloadExcel(`日結單-${d.date}.xlsx`, [
-    { name: '總覽', rows: [['項目', '數值'], ['總營業額', d.total_sales], ['訂單數', d.order_count], ['客單價', d.avg_order], ['折扣合計', d.discount_total], ['服務費合計', d.service_total], ['作廢訂單數', d.void_count]] },
-    { name: '支付方式', rows: [['方式', '筆數', '金額'], ...d.by_payment.map((p) => [p.method, p.cnt, p.amount])] },
+    { name: '總覽', rows: [['項目', '數值'], ['總營業額', d.total_sales], ['訂單數', d.order_count], ['客單價', d.avg_order], ['折扣合計', d.discount_total], ['服務費合計', d.service_total], ['作廢訂單數', d.void_count], ['退款筆數', d.refund_count || 0], ['退款金額', d.refund_amount || 0]] },
+    { name: '支付方式', rows: [['方式', '筆數', '金額'], ...d.by_payment.map((p) => [payName(p.method), p.cnt, p.amount])] },
     { name: '時段分佈', rows: [['時段', '筆數', '金額'], ...d.by_hour.map((h) => [`${h.hour}:00`, h.cnt, h.amount])] },
     { name: '熱銷菜品', rows: [['菜品', '銷量', '金額'], ...d.top_products.map((p) => [p.name, p.qty, p.amount])] },
     { name: '分類營收', rows: [['分類', '銷量', '金額'], ...d.by_category.map((c) => [c.name, c.qty, c.amount])] },
@@ -229,8 +232,9 @@ const tabs = [
             <div class="text-2xl font-extrabold mt-1">{{ fmtMoney(daily.avg_order, cur) }}</div>
           </div>
           <div class="card p-4">
-            <div class="text-xs text-gray-400 font-bold">作廢 / 折扣</div>
-            <div class="text-2xl font-extrabold mt-1">{{ daily.void_count }} <span class="text-sm text-gray-400 font-normal">/ {{ fmtMoney(daily.discount_total, cur) }}</span></div>
+            <div class="text-xs text-gray-400 font-bold">作廢 / 退款 / 折扣</div>
+            <div class="text-2xl font-extrabold mt-1">{{ daily.void_count }} <span class="text-sm text-gray-400 font-normal">/ {{ daily.refund_count || 0 }} / {{ fmtMoney(daily.discount_total, cur) }}</span></div>
+            <div v-if="daily.refund_amount" class="text-xs text-orange-500 font-bold mt-0.5">退款 {{ fmtMoney(daily.refund_amount, cur) }}</div>
           </div>
         </div>
 

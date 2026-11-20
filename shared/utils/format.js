@@ -53,7 +53,8 @@ export const TABLE_STATUS = {
 
 export const PAYMENT_META = {
   cash: { label: '現金', icon: '💵' },
-  mobile: { label: '行動支付', icon: '📱' },
+  alipay: { label: '支付寶', icon: '<span class="inline-flex items-center justify-center w-6 h-6 rounded-md text-white text-xs font-bold" style="background:#1677FF">支</span>' },
+  octopus: { label: '八達通', icon: '🟠' },
   card: { label: '信用卡', icon: '💳' },
   credit: { label: '記帳', icon: '📒' },
 };

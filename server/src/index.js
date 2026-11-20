@@ -764,6 +764,8 @@ app.get('/api/reports/daily', (req, res) => {
       COUNT(*) AS order_count
     FROM orders WHERE status = 'completed' AND date(created_at) = ?`).get(date);
   const voidCount = db.prepare(`SELECT COUNT(*) AS c FROM orders WHERE status = 'voided' AND date(created_at) = ?`).get(date).c;
+  const refundStats = db.prepare(`SELECT COUNT(*) AS cnt, COALESCE(SUM(pay_amount), 0) AS amount
+    FROM orders WHERE status = 'refunded' AND date(created_at) = ?`).get(date);
   const byPayment = db.prepare(`SELECT payment_method AS method, COUNT(*) AS cnt, SUM(pay_amount) AS amount
     FROM orders WHERE status = 'completed' AND date(created_at) = ? GROUP BY payment_method`).all(date);
   const byHour = db.prepare(`SELECT strftime('%H', created_at) AS hour, COUNT(*) AS cnt, SUM(pay_amount) AS amount
@@ -786,6 +788,8 @@ app.get('/api/reports/daily', (req, res) => {
     ...summary,
     avg_order: summary.order_count ? Math.round(summary.total_sales / summary.order_count) : 0,
     void_count: voidCount,
+    refund_count: refundStats.cnt,
+    refund_amount: refundStats.amount,
     by_payment: byPayment,
     by_hour: byHour,
     top_products: topProducts,

@@ -64,6 +64,8 @@ const receipt = ref(null);
 const voidModal = ref(false);
 const splitModal = ref(false);
 const splitForm = ref({ selectedIds: [], tableId: null });
+const priceModal = ref(false);
+const priceForm = ref({ amount: 0 });
 const wizardProduct = ref(null);
 const drinkProduct = ref(null);
 const receiptTab = ref('customer');
@@ -345,6 +347,19 @@ const kitchenText = computed(() => {
   return lines.join('\n');
 });
 
+/* ---------------- 改價 ---------------- */
+function openPriceModal() {
+  priceForm.value = { amount: pos.subtotal + pos.serviceFee };
+  priceModal.value = true;
+}
+function applyPrice() {
+  const target = Math.max(0, Number(priceForm.value.amount) || 0);
+  const gross = pos.subtotal + pos.serviceFee;
+  const discount = Math.max(0, gross - target);
+  pos.setDiscount(discount, '改價');
+  priceModal.value = false;
+}
+
 function paymentMeta(m) {
   return PAYMENT_META[m] || { label: m, icon: '💰' };
 }
@@ -539,9 +554,16 @@ const cashShort = computed(() => pos.paymentMethod === 'cash' && pos.received > 
             :class="pos.paymentMethod === pm.code ? 'border-brand-500 bg-brand-50' : 'border-gray-200'"
             @click="pos.setPayment(pm.code)"
           >
-            <div class="ico-lg mx-auto">{{ paymentMeta(pm.code).icon }}</div>
+            <div class="ico-lg mx-auto flex items-center justify-center" v-html="paymentMeta(pm.code).icon" />
             <div class="text-xs font-bold mt-0.5">{{ pm.name }}</div>
             <div v-if="Number(pm.fee_rate) > 0" class="text-[10px] text-gray-400">費率{{ (pm.fee_rate * 100).toFixed(1) }}%</div>
+          </button>
+          <button
+            class="rounded-xl border-2 border-gray-200 py-2 text-center transition active:scale-95 hover:border-brand-300"
+            @click="openPriceModal"
+          >
+            <div class="ico-lg mx-auto">改</div>
+            <div class="text-xs font-bold mt-0.5">改價</div>
           </button>
         </div>
 
@@ -795,6 +817,33 @@ const cashShort = computed(() => pos.paymentMethod === 'cash' && pos.received > 
       <template #footer>
         <button class="btn-ghost" @click="splitModal = false">取消</button>
         <button class="btn-primary" :disabled="!splitForm.selectedIds.length" @click="confirmSplit">確認分單</button>
+      </template>
+    </Modal>
+
+    <!-- ============ 改價 ============ -->
+    <Modal v-model="priceModal" title="改價" width="max-w-sm">
+      <div class="space-y-4">
+        <div class="bg-gray-50 rounded-xl px-4 py-3 flex justify-between text-sm">
+          <span class="text-gray-500">目前合計</span>
+          <span class="font-extrabold">{{ fmtMoney(pos.subtotal + pos.serviceFee, catalog.currency) }}</span>
+        </div>
+        <div>
+          <div class="label">改為金額</div>
+          <input
+            v-model="priceForm.amount"
+            type="number"
+            min="0"
+            class="input text-lg font-extrabold"
+            placeholder="輸入新價格"
+          />
+        </div>
+        <div v-if="pos.subtotal + pos.serviceFee - Number(priceForm.amount || 0) > 0" class="text-sm text-red-500">
+          將折扣 −{{ fmtMoney(pos.subtotal + pos.serviceFee - Number(priceForm.amount || 0), catalog.currency) }}
+        </div>
+      </div>
+      <template #footer>
+        <button class="btn-ghost" @click="priceModal = false">取消</button>
+        <button class="btn-primary" @click="applyPrice">確認改價</button>
       </template>
     </Modal>
 

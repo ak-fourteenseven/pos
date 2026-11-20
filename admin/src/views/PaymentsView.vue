@@ -16,7 +16,13 @@ onMounted(async () => {
   }
 });
 
-const METHOD_ICONS = { cash: '💵', mobile: '📱', card: '💳', credit: '📒' };
+const METHOD_ICONS = {
+  cash: '💵',
+  alipay: '<span class="inline-flex items-center justify-center w-8 h-8 rounded-lg text-white text-sm font-bold" style="background:#1677FF">支</span>',
+  octopus: '🟠',
+  card: '💳',
+  credit: '📒',
+};
 
 async function save(pm) {
   saving.value = pm.id;
@@ -49,7 +55,7 @@ async function toggle(pm) {
     <div class="grid sm:grid-cols-2 gap-4">
       <div v-for="pm in catalog.payments" :key="pm.id" class="card p-5">
         <div class="flex items-center gap-3">
-          <span class="text-3xl">{{ METHOD_ICONS[pm.code] || '💰' }}</span>
+          <span class="text-3xl flex items-center" v-html="METHOD_ICONS[pm.code] || '💰'" />
           <div class="flex-1">
             <input v-model="pm.name" class="input !border-transparent !px-0 font-extrabold !text-lg hover:!border-gray-200 focus:!border-brand-400 focus:!px-3" />
             <div class="text-xs text-gray-400 mt-0.5">代碼：{{ pm.code }}</div>

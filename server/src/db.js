@@ -227,9 +227,10 @@ function seed() {
 
   const insertPay = d.prepare('INSERT INTO payment_methods (code, name, is_enabled, fee_rate, sort_order) VALUES (?, ?, ?, ?, ?)');
   insertPay.run('cash', '現金', 1, 0, 1);
-  insertPay.run('mobile', '行動支付', 1, 0, 2);
-  insertPay.run('card', '信用卡', 1, 0.025, 3);
-  insertPay.run('credit', '記帳', 1, 0, 4);
+  insertPay.run('alipay', '支付寶', 1, 0, 2);
+  insertPay.run('octopus', '八達通', 1, 0, 3);
+  insertPay.run('card', '信用卡', 1, 0.025, 4);
+  insertPay.run('credit', '記帳', 1, 0, 5);
 
   const insertCat = d.prepare('INSERT INTO categories (name, sort_order) VALUES (?, ?)');
   const cats = ['飲品', '咖啡', '快餐', '小食', '甜點'];
