@@ -62,6 +62,33 @@
   }
 }
 
+/* POS 菜品區：依中欄實際寬度切欄數（適配 4:3 / 16:9） */
+.pos-menu-pane {
+  container-type: inline-size;
+  container-name: pos-menu;
+}
+.pos-product-grid {
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+@container pos-menu (min-width: 420px) {
+  .pos-product-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+/* 4:3 中欄約 650px 維持 3 欄；寬螢幕再升 4/5 欄 */
+@container pos-menu (min-width: 720px) {
+  .pos-product-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+@container pos-menu (min-width: 920px) {
+  .pos-product-grid {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+}
+
 /* 細滾動條 */
 ::-webkit-scrollbar {
   width: 8px;

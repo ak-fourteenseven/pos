@@ -1,4 +1,4 @@
-import { defineStore } from 'pinia';
+import { acceptHMRUpdate, defineStore } from 'pinia';
 import { api } from '@shared/api';
 import { useCatalogStore } from '@shared/stores/catalog';
 import { useToastStore } from '@shared/stores/toast';
@@ -17,6 +17,8 @@ export const usePosStore = defineStore('pos', {
     tableId: null,
     tableNumber: '',
     items: [], // { id, product_id, name, emoji, color, price, qty, spec, remark, spec_diff }
+    /** 購物車目前選中的明細 id（單選；無選中為 null） */
+    selectedItemId: null,
     discount: 0,
     discountLabel: '',
     paymentMethod: 'cash',
@@ -40,6 +42,11 @@ export const usePosStore = defineStore('pos', {
     hasServerOrder: (s) => s.orderId != null,
     /** 尚未送廚的明細數量（>0 時需按「下單」送廚房） */
     pendingCount: (s) => s.items.filter((it) => !it.sent).length,
+    /** 目前選中的購物車明細（找不到則視為未選） */
+    selectedItem: (s) => {
+      if (s.selectedItemId == null) return null;
+      return s.items.find((it) => String(it.id) === String(s.selectedItemId)) || null;
+    },
   },
   actions: {
     reset() {
@@ -48,10 +55,32 @@ export const usePosStore = defineStore('pos', {
       this.tableId = null;
       this.tableNumber = '';
       this.items = [];
+      this.selectedItemId = null;
       this.discount = 0;
       this.discountLabel = '';
       this.paymentMethod = 'cash';
       this.received = 0;
+    },
+    /** 選中購物車某一列（傳 item 或 id；傳 null 清除） */
+    selectItem(itemOrId) {
+      if (itemOrId == null) {
+        this.selectedItemId = null;
+        return;
+      }
+      const id = typeof itemOrId === 'object' ? itemOrId.id : itemOrId;
+      this.selectedItemId = id;
+    },
+    /** 若選中 id 已不在 items 中則清除（寬鬆比對，避免 number/string 不一致） */
+    syncSelection() {
+      if (this.selectedItemId == null) return;
+      if (!this.items.some((it) => String(it.id) === String(this.selectedItemId))) {
+        this.selectedItemId = null;
+      }
+    },
+    isSelected(itemOrId) {
+      if (this.selectedItemId == null || itemOrId == null) return false;
+      const id = typeof itemOrId === 'object' ? itemOrId.id : itemOrId;
+      return String(this.selectedItemId) === String(id);
     },
     /** 開台後綁定服務端訂單 */
     bindOrder(order, tableNumber) {
@@ -87,9 +116,11 @@ export const usePosStore = defineStore('pos', {
         const it = await api.post(`/orders/${this.orderId}/items`, {
           product_id: product.id, quantity: qty, spec, spec_diff, remark,
         });
-        this.items.push(this.mapItem(it));
+        const mapped = this.mapItem(it);
+        this.items.push(mapped);
+        this.selectItem(mapped);
       } else {
-        this.items.push({
+        const row = {
           id: `t${++tempSeq}`,
           product_id: product.id,
           name: product.name,
@@ -97,7 +128,9 @@ export const usePosStore = defineStore('pos', {
           qty,
           spec,
           remark,
-        });
+        };
+        this.items.push(row);
+        this.selectItem(row);
       }
     },
     /** 套餐（向導結果）：unitPrice 為前端即時計算價，後端會覆核 */
@@ -106,9 +139,11 @@ export const usePosStore = defineStore('pos', {
         const it = await api.post(`/orders/${this.orderId}/items`, {
           product_id: product.id, quantity: qty, options,
         });
-        this.items.push(this.mapItem(it));
+        const mapped = this.mapItem(it);
+        this.items.push(mapped);
+        this.selectItem(mapped);
       } else {
-        this.items.push({
+        const row = {
           id: `t${++tempSeq}`,
           product_id: product.id,
           name: product.name,
@@ -118,7 +153,9 @@ export const usePosStore = defineStore('pos', {
           remark: '',
           item_type: 'combo',
           options,
-        });
+        };
+        this.items.push(row);
+        this.selectItem(row);
       }
     },
     /** 獨立飲品：temperature HOT/COLD，preferences 口味標籤 */
@@ -129,9 +166,11 @@ export const usePosStore = defineStore('pos', {
         const it = await api.post(`/orders/${this.orderId}/items`, {
           product_id: product.id, quantity: qty, options, spec: tempLabel,
         });
-        this.items.push(this.mapItem(it));
+        const mapped = this.mapItem(it);
+        this.items.push(mapped);
+        this.selectItem(mapped);
       } else {
-        this.items.push({
+        const row = {
           id: `t${++tempSeq}`,
           product_id: product.id,
           name: product.name,
@@ -141,7 +180,9 @@ export const usePosStore = defineStore('pos', {
           remark: preferences.join('、'),
           item_type: 'simple',
           options,
-        });
+        };
+        this.items.push(row);
+        this.selectItem(row);
       }
     },
     async setQty(item, qty) {
@@ -151,22 +192,42 @@ export const usePosStore = defineStore('pos', {
         await api.put(`/orders/${this.orderId}/items/${item.id}`, { quantity: q, remark: item.remark || '' });
       }
       item.qty = q;
+      this.selectItem(item);
     },
     async updateItem(item, { remark, spec } = {}) {
       if (remark !== undefined) item.remark = remark;
       if (spec !== undefined) item.spec = spec;
       if (this.orderId && typeof item.id === 'number') {
-        await api.put(`/orders/${this.orderId}/items/${item.id}`, { quantity: item.qty, remark: item.remark || '' });
+        await api.put(`/orders/${this.orderId}/items/${item.id}`, {
+          quantity: item.qty,
+          remark: item.remark || '',
+          price: item.price,
+        });
       }
+    },
+    /** 改單品單價（改價） */
+    async setItemPrice(item, price) {
+      const p = Math.max(0, Number(price) || 0);
+      if (this.orderId && typeof item.id === 'number') {
+        await api.put(`/orders/${this.orderId}/items/${item.id}`, {
+          quantity: item.qty,
+          remark: item.remark || '',
+          price: p,
+        });
+      }
+      item.price = p;
+      this.selectItem(item);
     },
     async removeItem(item) {
       if (this.orderId && typeof item.id === 'number') {
         await api.del(`/orders/${this.orderId}/items/${item.id}`);
       }
       this.items = this.items.filter((i) => i.id !== item.id);
+      if (String(this.selectedItemId) === String(item.id)) this.selectedItemId = null;
     },
     clearItems() {
       this.items = [];
+      this.selectedItemId = null;
     },
     setDiscount(amount, label = '') {
       this.discount = Math.max(0, Number(amount) || 0);
@@ -179,11 +240,12 @@ export const usePosStore = defineStore('pos', {
     setReceived(v) {
       this.received = v;
     },
-    /** 組裝傳給後端的明細 payload（含套餐選項） */
+    /** 組裝傳給後端的明細 payload（含套餐選項；price 保留改價後單價） */
     itemPayload(i) {
       const payload = {
         product_id: i.product_id,
         quantity: i.qty,
+        price: Number(i.price),
         spec: i.spec || undefined,
         remark: i.remark || undefined,
       };
@@ -207,12 +269,16 @@ export const usePosStore = defineStore('pos', {
         if (created.items && created.items.length) {
           this.items = created.items.map((it) => this.mapItem(it));
           this.orderId = orderId;
+          this.syncSelection();
         }
       }
       const res = await api.post(`/orders/${orderId}/submit`);
       // 以服務端狀態刷新購物車（明細帶上 sent_at）
       const full = await api.get(`/orders/${orderId}`);
-      if (full && full.items) this.items = full.items.map((it) => this.mapItem(it));
+      if (full && full.items) {
+        this.items = full.items.map((it) => this.mapItem(it));
+        this.syncSelection();
+      }
       return res;
     },
     /** 廚房單（補印/重印：取該訂單已送廚的全部明細） */
@@ -233,6 +299,7 @@ export const usePosStore = defineStore('pos', {
         if (created.items && created.items.length) {
           this.items = created.items.map((it) => this.mapItem(it));
           this.orderId = orderId;
+          this.syncSelection();
         }
       }
       if (this.paymentMethod === 'cash' && Number(this.received || 0) < this.total) {
@@ -260,7 +327,12 @@ export const usePosStore = defineStore('pos', {
         table_id: tableId,
       });
       this.items = res.original.items.map((it) => this.mapItem(it));
+      this.syncSelection();
       return res.new_order;
     },
   },
 });
+
+if (import.meta.hot) {
+  import.meta.hot.accept(acceptHMRUpdate(usePosStore, import.meta.hot));
+}

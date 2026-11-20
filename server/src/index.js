@@ -511,9 +511,13 @@ app.post('/api/orders', (req, res) => {
     if (!p) continue;
     const calc = computeComboUnitPrice(db, p, it);
     const itemType = p.kind === 'combo' ? 'combo' : calc.options ? 'combo' : 'simple';
+    /* 若前端帶入 price（改價），覆寫後端覆核價 */
+    const unit = it.price != null && it.price !== ''
+      ? Math.max(0, Number(it.price) || 0)
+      : calc.unit;
     db.prepare(`INSERT INTO order_items
       (order_id, product_id, product_name, price, quantity, spec, remark, item_type, options)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(orderId, p.id, p.name, calc.unit,
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(orderId, p.id, p.name, unit,
       Number(it.quantity || 1), it.spec ?? null, it.remark ?? null, itemType,
       calc.options ? JSON.stringify(calc.options) : null);
   }
@@ -548,12 +552,18 @@ app.put('/api/orders/:id/items/:itemId', (req, res) => {
   if (!order || (order.status !== 'open' && order.status !== 'ordered')) return fail(res, '訂單狀態不可修改');
   const it = db.prepare('SELECT * FROM order_items WHERE id = ? AND order_id = ?').get(req.params.itemId, order.id);
   if (!it) return fail(res, '訂單明細不存在', 404);
-  if (it.sent_at) return fail(res, '已送廚的菜品不可改數量，請退菜後重新點');
-  const { quantity, remark } = req.body || {};
-  db.prepare('UPDATE order_items SET quantity = ?, remark = ? WHERE id = ? AND order_id = ?')
-    .run(Number(quantity), remark ?? null, req.params.itemId, order.id);
+  const { quantity, remark, price } = req.body || {};
+  /* 已送廚不可改數量；改價（單價）仍允許 */
+  if (quantity != null && Number(quantity) !== Number(it.quantity) && it.sent_at) {
+    return fail(res, '已送廚的菜品不可改數量，請退菜後重新點');
+  }
+  const nextQty = quantity != null ? Number(quantity) : Number(it.quantity);
+  const nextRemark = remark !== undefined ? (remark ?? null) : it.remark;
+  const nextPrice = price != null ? Math.max(0, Number(price) || 0) : Number(it.price);
+  db.prepare('UPDATE order_items SET quantity = ?, remark = ?, price = ? WHERE id = ? AND order_id = ?')
+    .run(nextQty, nextRemark, nextPrice, req.params.itemId, order.id);
   recomputeOrderTotal(db, order.id);
-  ok(res, { updated: true });
+  ok(res, { updated: true, price: nextPrice, quantity: nextQty });
 });
 /** 退菜：已送廚的明細需店長權限（避免廚房已動工） */
 app.delete('/api/orders/:id/items/:itemId', (req, res) => {

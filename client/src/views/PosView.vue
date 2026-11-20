@@ -65,7 +65,8 @@ const voidModal = ref(false);
 const splitModal = ref(false);
 const splitForm = ref({ selectedIds: [], tableId: null });
 const priceModal = ref(false);
-const priceForm = ref({ amount: 0 });
+const priceForm = ref({ price: 0 });
+const priceInputRef = ref(null);
 const wizardProduct = ref(null);
 const drinkProduct = ref(null);
 const receiptTab = ref('customer');
@@ -347,17 +348,51 @@ const kitchenText = computed(() => {
   return lines.join('\n');
 });
 
-/* ---------------- 改價 ---------------- */
+/* ---------------- 改價（選中列的單價） ---------------- */
 function openPriceModal() {
-  priceForm.value = { amount: pos.subtotal + pos.serviceFee };
+  const item = pos.selectedItem;
+  if (!item) {
+    toast.error('請先在購物車選取要改價的項目');
+    return;
+  }
+  priceForm.value = { price: Number(item.price) || 0 };
   priceModal.value = true;
+  requestAnimationFrame(() => {
+    const el = priceInputRef.value;
+    if (el) {
+      el.focus();
+      el.select?.();
+    }
+  });
 }
-function applyPrice() {
-  const target = Math.max(0, Number(priceForm.value.amount) || 0);
-  const gross = pos.subtotal + pos.serviceFee;
-  const discount = Math.max(0, gross - target);
-  pos.setDiscount(discount, '改價');
-  priceModal.value = false;
+async function applyPrice() {
+  const item = pos.selectedItem;
+  if (!item) {
+    toast.error('請先選取要改價的項目');
+    priceModal.value = false;
+    return;
+  }
+  const p = Math.max(0, Number(priceForm.value.price) || 0);
+  try {
+    if (typeof pos.setItemPrice === 'function') {
+      await pos.setItemPrice(item, p);
+    } else {
+      /* Pinia HMR 可能尚未掛上新 action：直接改單價並同步後端 */
+      if (pos.orderId && typeof item.id === 'number') {
+        await api.put(`/orders/${pos.orderId}/items/${item.id}`, {
+          quantity: item.qty,
+          remark: item.remark || '',
+          price: p,
+        });
+      }
+      item.price = p;
+      pos.selectItem?.(item);
+    }
+    priceModal.value = false;
+    toast.success(`已改價為 ${fmtMoney(item.price, catalog.currency)}`);
+  } catch (e) {
+    toast.error(e.message);
+  }
 }
 
 function paymentMeta(m) {
@@ -368,15 +403,15 @@ const cashShort = computed(() => pos.paymentMethod === 'cash' && pos.received > 
 </script>
 
 <template>
-  <div class="h-full flex">
-    <!-- 左：菜品展示區 -->
-    <section class="flex-1 flex flex-col min-w-0">
+  <div class="h-full flex min-h-0">
+    <!-- 左：菜品展示區（container query 依中欄寬度切欄） -->
+    <section class="pos-menu-pane flex-1 flex flex-col min-w-0 min-h-0">
       <!-- 工具列：單據狀態 / 輔助操作 / 主要動作 -->
-      <div class="bg-white border-b border-gray-200 px-4 py-2.5 flex items-center gap-2 flex-wrap shrink-0 shadow-[0_1px_0_rgba(0,0,0,0.02)]">
+      <div class="bg-white border-b border-gray-200 px-2 xl:px-4 py-2 xl:py-2.5 flex items-center gap-1.5 xl:gap-2 flex-wrap shrink-0 shadow-[0_1px_0_rgba(0,0,0,0.02)]">
         <!-- 左：目前單據狀態 -->
-        <div class="flex items-center gap-2 pr-3 mr-1 border-r border-gray-200">
+        <div class="flex items-center gap-1.5 xl:gap-2 pr-2 xl:pr-3 mr-0.5 xl:mr-1 border-r border-gray-200 min-w-0">
           <span
-            class="chip !gap-1.5 !px-3 !py-1 !text-[13px]"
+            class="chip !gap-1.5 !px-2.5 xl:!px-3 !py-1 !text-xs xl:!text-[13px] max-w-[14rem] xl:max-w-none truncate"
             :class="pos.tableId ? 'bg-brand-100 text-brand-700' : pos.hasServerOrder ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-600'"
           >
             <span class="ico">{{ pos.tableId ? '🪑' : '🥡' }}</span>
@@ -386,39 +421,40 @@ const cashShort = computed(() => pos.paymentMethod === 'cash' && pos.received > 
           </span>
           <span
             v-if="pos.hasServerOrder"
-            class="chip !gap-1.5 !px-3 !py-1 !text-[13px]"
+            class="chip !gap-1.5 !px-2.5 xl:!px-3 !py-1 !text-xs xl:!text-[13px] shrink-0"
             :class="pos.pendingCount ? 'bg-gray-100 text-gray-500' : 'bg-emerald-100 text-emerald-700'"
           >
             <span class="ico">{{ pos.pendingCount ? '⏳' : '✅' }}</span>
-            {{ pos.pendingCount ? `${pos.pendingCount} 項待送廚` : '已全部送廚' }}
+            <span class="hidden sm:inline">{{ pos.pendingCount ? `${pos.pendingCount} 項待送廚` : '已全部送廚' }}</span>
+            <span class="sm:hidden">{{ pos.pendingCount ? `${pos.pendingCount}待送` : '已送廚' }}</span>
           </span>
         </div>
 
         <!-- 中：輔助操作 -->
-        <div class="flex items-center gap-2">
-          <button class="btn-ghost btn-sm" @click="router.push('/tables')"><span class="ico">🪑</span>桌台視圖</button>
-          <button v-if="pos.tableId" class="btn-ghost btn-sm" @click="moveModal = true"><span class="ico">🔄</span>換桌</button>
-          <button v-if="pos.hasServerOrder && pos.items.length > 1" class="btn-ghost btn-sm" @click="openSplit"><span class="ico">✂️</span>分單</button>
-          <button v-if="pos.hasServerOrder && auth.isManager" class="btn-ghost btn-sm !text-red-500 hover:!bg-red-50" @click="voidModal = true"><span class="ico">🚫</span>作廢</button>
+        <div class="flex items-center gap-1.5 xl:gap-2 flex-wrap">
+          <button class="btn-ghost btn-sm" @click="router.push('/tables')"><span class="ico">🪑</span><span class="hidden lg:inline">桌台視圖</span></button>
+          <button v-if="pos.tableId" class="btn-ghost btn-sm" @click="moveModal = true"><span class="ico">🔄</span><span class="hidden lg:inline">換桌</span></button>
+          <button v-if="pos.hasServerOrder && pos.items.length > 1" class="btn-ghost btn-sm" @click="openSplit"><span class="ico">✂️</span><span class="hidden lg:inline">分單</span></button>
+          <button v-if="pos.hasServerOrder && auth.isManager" class="btn-ghost btn-sm !text-red-500 hover:!bg-red-50" @click="voidModal = true"><span class="ico">🚫</span><span class="hidden lg:inline">作廢</span></button>
         </div>
 
-        <div class="flex-1" />
+        <div class="flex-1 min-w-2" />
 
         <!-- 右：時段資訊 + 主要動作 -->
-        <span class="chip !gap-1.5 !px-3 !py-1 !text-[13px] bg-amber-100 text-amber-700"><span class="ico">🕐</span>{{ slotRuleText(nowSlot) }}</span>
-        <span v-if="catalog.serviceRate > 0" class="chip !gap-1.5 !px-3 !py-1 !text-[13px] bg-amber-100 text-amber-700"><span class="ico">💁</span>服務費 {{ catalog.serviceRate }}%</span>
-        <button class="btn-ghost btn-sm" :disabled="!pos.hasServerOrder" @click="reprintTicket"><span class="ico">🖨️</span>廚房單補印</button>
+        <span class="chip !gap-1.5 !px-2.5 xl:!px-3 !py-1 !text-xs xl:!text-[13px] bg-amber-100 text-amber-700 max-w-[10rem] xl:max-w-none truncate"><span class="ico">🕐</span>{{ slotRuleText(nowSlot) }}</span>
+        <span v-if="catalog.serviceRate > 0" class="chip !gap-1.5 !px-2.5 xl:!px-3 !py-1 !text-xs xl:!text-[13px] bg-amber-100 text-amber-700 hidden xl:inline-flex"><span class="ico">💁</span>服務費 {{ catalog.serviceRate }}%</span>
+        <button class="btn-ghost btn-sm" :disabled="!pos.hasServerOrder" @click="reprintTicket"><span class="ico">🖨️</span><span class="hidden xl:inline">廚房單補印</span></button>
         <button
-          class="btn-primary btn-sm !px-4 !py-2 !text-sm"
+          class="btn-primary btn-sm !px-3 xl:!px-4 !py-2 !text-sm"
           :disabled="!pos.pendingCount || submitting"
           @click="submitOrder"
         >
-          <span class="ico">🥘</span>{{ submitting ? '送廚中…' : '下單（送廚房）' }}
+          <span class="ico">🥘</span>{{ submitting ? '送廚中…' : '下單' }}<span class="hidden xl:inline">（送廚房）</span>
         </button>
       </div>
 
       <!-- 分類 -->
-      <div class="bg-white border-b border-gray-200 px-4 py-2 flex gap-2 overflow-x-auto shrink-0">
+      <div class="bg-white border-b border-gray-200 px-2 xl:px-4 py-2 flex gap-2 overflow-x-auto shrink-0">
         <button
           class="btn btn-sm shrink-0"
           :class="activeCategory === 'all' ? 'bg-brand-500 text-white' : 'bg-gray-100 text-gray-600'"
@@ -435,30 +471,30 @@ const cashShort = computed(() => pos.paymentMethod === 'cash' && pos.received > 
         >
           {{ c.name }}（{{ c.products.length }}）
         </button>
-        <div class="flex-1" />
-        <input v-model="keyword" class="input !w-44 !py-1" placeholder="搜尋菜品…" />
+        <div class="flex-1 min-w-2" />
+        <input v-model="keyword" class="input !w-28 xl:!w-44 !py-1 shrink-0" placeholder="搜尋…" />
       </div>
 
       <!-- 菜品網格 -->
-      <div class="flex-1 overflow-y-auto p-4">
-        <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 2xl:grid-cols-5 gap-3">
+      <div class="flex-1 overflow-y-auto p-2.5 xl:p-4 min-h-0">
+        <div class="pos-product-grid">
           <button
             v-for="p in products"
             :key="p.id"
-            class="relative rounded-2xl border-2 p-3 text-left transition active:scale-95 hover:shadow-md"
+            class="relative rounded-2xl border-2 p-2.5 xl:p-3 text-left transition active:scale-95 hover:shadow-md min-w-0"
             :style="{
               borderColor: hexA(p.color, 0.35),
               background: hexA(p.color, 0.07),
             }"
             @click="onProduct(p)"
           >
-            <div class="text-4xl text-center leading-none py-2">{{ p.emoji }}</div>
-            <div class="mt-2 font-bold text-gray-800 truncate">{{ p.name }}</div>
-            <div class="flex items-center justify-between mt-0.5">
-              <span class="font-extrabold" :style="{ color: p.color }">{{ fmtMoney(p.price, catalog.currency) }}</span>
-              <span v-if="p.kind === 'combo'" class="chip bg-brand-100 text-brand-700 text-[10px]">套餐</span>
-              <span v-else-if="Number(p.is_drink) === 1" class="chip bg-sky-100 text-sky-700 text-[10px]">飲品</span>
-              <span v-else-if="p.steps && p.steps.length" class="chip bg-violet-100 text-violet-700 text-[10px]">選口味</span>
+            <div class="text-3xl xl:text-4xl text-center leading-none py-1.5 xl:py-2">{{ p.emoji }}</div>
+            <div class="mt-1.5 xl:mt-2 font-bold text-sm xl:text-base text-gray-800 truncate" :title="p.name">{{ p.name }}</div>
+            <div class="flex items-center justify-between mt-0.5 gap-1 min-w-0">
+              <span class="font-extrabold text-sm xl:text-base truncate" :style="{ color: p.color }">{{ fmtMoney(p.price, catalog.currency) }}</span>
+              <span v-if="p.kind === 'combo'" class="chip bg-brand-100 text-brand-700 text-[10px] shrink-0">套餐</span>
+              <span v-else-if="Number(p.is_drink) === 1" class="chip bg-sky-100 text-sky-700 text-[10px] shrink-0">飲品</span>
+              <span v-else-if="p.steps && p.steps.length" class="chip bg-violet-100 text-violet-700 text-[10px] shrink-0">選口味</span>
             </div>
             <div v-if="Number(p.is_available) !== 1" class="absolute inset-0 bg-white/70 rounded-2xl flex items-center justify-center font-extrabold text-gray-400">
               售罄
@@ -469,15 +505,15 @@ const cashShort = computed(() => pos.paymentMethod === 'cash' && pos.received > 
       </div>
     </section>
 
-    <!-- 右：購物車 / 結帳面板 -->
-    <aside class="w-[380px] shrink-0 bg-white border-l border-gray-200 flex flex-col">
-      <div class="px-4 py-3 border-b border-gray-100 flex items-center justify-between shrink-0">
+    <!-- 右：購物車 / 結帳面板（4:3 收窄；短高時金額/支付可捲，結賬固定） -->
+    <aside class="w-[300px] xl:w-[340px] 2xl:w-[380px] shrink-0 bg-white border-l border-gray-200 flex flex-col min-h-0">
+      <div class="px-3 xl:px-4 py-2.5 xl:py-3 border-b border-gray-100 flex items-center justify-between shrink-0">
         <span class="font-extrabold">購物車</span>
         <span class="chip bg-gray-100 text-gray-500">{{ pos.count }} 件</span>
       </div>
 
       <!-- 明細 -->
-      <div class="flex-1 overflow-y-auto">
+      <div class="flex-1 overflow-y-auto min-h-0">
         <div v-if="!pos.items.length" class="h-full flex flex-col items-center justify-center text-gray-300 gap-2 py-10">
           <div class="text-5xl">🛒</div>
           <div class="text-sm">購物車空空，快來點餐吧</div>
@@ -485,34 +521,86 @@ const cashShort = computed(() => pos.paymentMethod === 'cash' && pos.received > 
         <div
           v-for="item in pos.items"
           :key="item.id"
-          class="px-4 py-3 border-b border-gray-50 flex gap-3 items-start"
+          role="button"
+          tabindex="0"
+          class="px-3 xl:px-4 py-2.5 xl:py-3 border-b flex gap-2 xl:gap-3 items-start cursor-pointer transition border-l-4"
+          :class="pos.isSelected(item)
+            ? 'bg-brand-500 border-brand-600 border-l-brand-700 text-white shadow-sm'
+            : 'bg-white border-gray-100 border-l-transparent hover:bg-gray-50'"
+          @click="pos.selectItem(item)"
+          @keydown.enter.prevent="pos.selectItem(item)"
+          @keydown.space.prevent="pos.selectItem(item)"
         >
           <div class="flex-1 min-w-0">
-            <div class="font-bold text-sm text-gray-800 truncate">
+            <div
+              class="font-bold text-sm truncate"
+              :class="pos.isSelected(item) ? 'text-white' : 'text-gray-900'"
+            >
               {{ item.name }}
-              <span v-if="item.item_type === 'combo'" class="chip bg-brand-100 text-brand-700 text-[10px] ml-1">套餐</span>
-              <span v-if="item.sent" class="chip bg-emerald-100 text-emerald-700 text-[10px] ml-1">已送廚</span>
-              <span v-else class="chip bg-gray-100 text-gray-400 text-[10px] ml-1">未送廚</span>
+              <span
+                v-if="item.item_type === 'combo'"
+                class="chip text-[10px] ml-1"
+                :class="pos.isSelected(item) ? 'bg-white/25 text-white' : 'bg-brand-100 text-brand-700'"
+              >套餐</span>
+              <span
+                v-if="item.sent"
+                class="chip text-[10px] ml-1"
+                :class="pos.isSelected(item) ? 'bg-white/25 text-white' : 'bg-emerald-100 text-emerald-700'"
+              >已送廚</span>
+              <span
+                v-else
+                class="chip text-[10px] ml-1"
+                :class="pos.isSelected(item) ? 'bg-white/20 text-white/90' : 'bg-gray-200 text-gray-600'"
+              >未送廚</span>
             </div>
-            <div v-for="(line, i) in optionLines(item)" :key="i" class="text-xs text-gray-400 mt-0.5 truncate">{{ line }}</div>
-            <div v-if="item.spec || item.remark" class="text-xs text-gray-400 mt-0.5 truncate">
+            <div
+              v-for="(line, i) in optionLines(item)"
+              :key="i"
+              class="text-xs mt-0.5 truncate"
+              :class="pos.isSelected(item) ? 'text-brand-50' : 'text-gray-600'"
+            >{{ line }}</div>
+            <div
+              v-if="item.spec || item.remark"
+              class="text-xs mt-0.5 truncate"
+              :class="pos.isSelected(item) ? 'text-brand-50' : 'text-gray-600'"
+            >
               <span v-if="item.spec">[{{ item.spec }}]</span> {{ item.remark }}
             </div>
-            <div class="text-brand-600 font-extrabold text-sm mt-1">
+            <div
+              class="font-extrabold text-sm mt-1"
+              :class="pos.isSelected(item) ? 'text-white' : 'text-brand-700'"
+            >
               {{ fmtMoney(item.price * item.qty, catalog.currency) }}
-              <span class="text-gray-400 font-normal">{{ fmtMoney(item.price, catalog.currency) }} × {{ item.qty }}</span>
             </div>
           </div>
-          <div class="flex flex-col items-end gap-1.5">
+          <div class="flex flex-col items-end gap-1.5 shrink-0" @click.stop>
             <div class="flex items-center gap-1">
-              <button class="w-7 h-7 rounded-lg bg-gray-100 font-bold text-gray-600 hover:bg-gray-200" @click="pos.setQty(item, item.qty - 1)">−</button>
-              <span class="w-7 text-center font-bold">{{ item.qty }}</span>
-              <button class="w-7 h-7 rounded-lg bg-brand-100 font-bold text-brand-600 hover:bg-brand-200" @click="pos.setQty(item, item.qty + 1)">＋</button>
+              <button
+                class="w-7 h-7 rounded-lg font-bold"
+                :class="pos.isSelected(item) ? 'bg-white/20 text-white hover:bg-white/30' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'"
+                @click="pos.setQty(item, item.qty - 1)"
+              >−</button>
+              <span
+                class="w-7 text-center font-bold"
+                :class="pos.isSelected(item) ? 'text-white' : 'text-gray-900'"
+              >{{ item.qty }}</span>
+              <button
+                class="w-7 h-7 rounded-lg font-bold"
+                :class="pos.isSelected(item) ? 'bg-white text-brand-600 hover:bg-brand-50' : 'bg-brand-100 text-brand-700 hover:bg-brand-200'"
+                @click="pos.setQty(item, item.qty + 1)"
+              >＋</button>
             </div>
             <div class="flex gap-2 text-xs">
-              <button class="text-gray-400 hover:text-brand-500" @click="editItem(item)">備註</button>
               <button
-                class="text-gray-400 hover:text-red-500 disabled:text-gray-200 disabled:cursor-not-allowed"
+                class="font-medium"
+                :class="pos.isSelected(item) ? 'text-white/90 hover:text-white' : 'text-gray-600 hover:text-brand-600'"
+                @click="editItem(item)"
+              >備註</button>
+              <button
+                class="font-medium disabled:cursor-not-allowed"
+                :class="pos.isSelected(item)
+                  ? 'text-white/90 hover:text-white disabled:text-white/40'
+                  : 'text-gray-600 hover:text-red-600 disabled:text-gray-300'"
                 :disabled="item.sent && !auth.isManager"
                 :title="item.sent && !auth.isManager ? '已送廚的菜品需店長權限才能退菜' : ''"
                 @click="pos.removeItem(item)"
@@ -524,89 +612,90 @@ const cashShort = computed(() => pos.paymentMethod === 'cash' && pos.received > 
         </div>
       </div>
 
-      <!-- 金額匯總 -->
-      <div class="border-t border-gray-100 px-4 py-3 space-y-1.5 text-sm shrink-0">
-        <div class="flex justify-between text-gray-500">
-          <span>小計</span>
-          <span>{{ fmtMoney(pos.subtotal, catalog.currency) }}</span>
-        </div>
-        <button class="flex justify-between w-full text-gray-500 hover:text-brand-500" @click="openDiscount">
-          <span>折扣{{ pos.discountLabel ? `（${pos.discountLabel}）` : '' }}</span>
-          <span :class="pos.discount > 0 ? 'text-red-500 font-bold' : ''">−{{ fmtMoney(pos.discount, catalog.currency) }}</span>
-        </button>
-        <div v-if="catalog.serviceRate > 0" class="flex justify-between text-gray-500">
-          <span>服務費（{{ catalog.serviceRate }}%）</span>
-          <span>{{ fmtMoney(pos.serviceFee, catalog.currency) }}</span>
-        </div>
-        <div class="flex justify-between items-end pt-1">
-          <span class="font-extrabold">應收總額</span>
-          <span class="text-2xl font-extrabold text-brand-600">{{ fmtMoney(pos.total, catalog.currency) }}</span>
-        </div>
-      </div>
-
-      <!-- 支付方式 -->
-      <div class="border-t border-gray-100 px-4 py-3 shrink-0">
-        <div class="grid grid-cols-4 gap-2">
-          <button
-            v-for="pm in catalog.enabledPayments"
-            :key="pm.id"
-            class="rounded-xl border-2 py-2 text-center transition active:scale-95"
-            :class="pos.paymentMethod === pm.code ? 'border-brand-500 bg-brand-50' : 'border-gray-200'"
-            @click="pos.setPayment(pm.code)"
-          >
-            <div class="ico-lg mx-auto flex items-center justify-center" v-html="paymentMeta(pm.code).icon" />
-            <div class="text-xs font-bold mt-0.5">{{ pm.name }}</div>
-            <div v-if="Number(pm.fee_rate) > 0" class="text-[10px] text-gray-400">費率{{ (pm.fee_rate * 100).toFixed(1) }}%</div>
-          </button>
-          <button
-            class="rounded-xl border-2 border-gray-200 py-2 text-center transition active:scale-95 hover:border-brand-300"
-            @click="openPriceModal"
-          >
-            <div class="ico-lg mx-auto">改</div>
-            <div class="text-xs font-bold mt-0.5">改價</div>
-          </button>
-        </div>
-
-        <!-- 現金找零 -->
-        <div v-if="pos.paymentMethod === 'cash'" class="mt-3 space-y-2">
-          <div class="flex gap-2">
-            <input
-              :value="pos.received || ''"
-              type="number"
-              min="0"
-              class="input"
-              placeholder="收現金額"
-              @input="pos.setReceived(Number($event.target.value) || 0)"
-              @keyup.enter="checkout"
-            />
-            <button
-              v-for="v in [100, 500, 1000]"
-              :key="v"
-              class="btn-ghost btn-sm shrink-0"
-              @click="pos.setReceived(Number(pos.received || 0) + v)"
-            >
-              +{{ v }}
-            </button>
-            <button class="btn-ghost btn-sm shrink-0" @click="pos.setReceived(pos.total)">剛好</button>
+      <!-- 金額 + 支付：短螢幕可捲動；結賬鈕固定在下方 -->
+      <div class="shrink-0 max-h-[46%] overflow-y-auto border-t border-gray-100">
+        <div class="px-3 xl:px-4 py-2.5 xl:py-3 space-y-1.5 text-sm">
+          <div class="flex justify-between text-gray-500">
+            <span>小計</span>
+            <span>{{ fmtMoney(pos.subtotal, catalog.currency) }}</span>
           </div>
-          <div class="flex justify-between text-sm" :class="cashShort ? 'text-red-500' : 'text-gray-500'">
-            <span>找零</span>
-            <span class="font-extrabold text-lg">{{ fmtMoney(pos.change, catalog.currency) }}</span>
+          <button class="flex justify-between w-full text-gray-500 hover:text-brand-500" @click="openDiscount">
+            <span>折扣{{ pos.discountLabel ? `（${pos.discountLabel}）` : '' }}</span>
+            <span :class="pos.discount > 0 ? 'text-red-500 font-bold' : ''">−{{ fmtMoney(pos.discount, catalog.currency) }}</span>
+          </button>
+          <div v-if="catalog.serviceRate > 0" class="flex justify-between text-gray-500">
+            <span>服務費（{{ catalog.serviceRate }}%）</span>
+            <span>{{ fmtMoney(pos.serviceFee, catalog.currency) }}</span>
+          </div>
+          <div class="flex justify-between items-end pt-1">
+            <span class="font-extrabold">應收總額</span>
+            <span class="text-xl xl:text-2xl font-extrabold text-brand-600">{{ fmtMoney(pos.total, catalog.currency) }}</span>
+          </div>
+        </div>
+
+        <div class="border-t border-gray-100 px-3 xl:px-4 py-2.5 xl:py-3">
+          <div class="grid grid-cols-4 gap-1.5 xl:gap-2">
+            <button
+              v-for="pm in catalog.enabledPayments"
+              :key="pm.id"
+              class="rounded-xl border-2 py-1.5 xl:py-2 text-center transition active:scale-95 min-w-0"
+              :class="pos.paymentMethod === pm.code ? 'border-brand-500 bg-brand-50' : 'border-gray-200'"
+              @click="pos.setPayment(pm.code)"
+            >
+              <div class="ico-lg mx-auto flex items-center justify-center" v-html="paymentMeta(pm.code).icon" />
+              <div class="text-[10px] xl:text-xs font-bold mt-0.5 truncate">{{ pm.name }}</div>
+              <div v-if="Number(pm.fee_rate) > 0" class="text-[10px] text-gray-400 truncate">費率{{ (pm.fee_rate * 100).toFixed(1) }}%</div>
+            </button>
+            <button
+              class="rounded-xl border-2 border-gray-200 py-1.5 xl:py-2 text-center transition active:scale-95 hover:border-brand-300 min-w-0"
+              @click="openPriceModal"
+            >
+              <div class="ico-lg mx-auto">改</div>
+              <div class="text-[10px] xl:text-xs font-bold mt-0.5">改價</div>
+            </button>
+          </div>
+
+          <!-- 現金找零 -->
+          <div v-if="pos.paymentMethod === 'cash'" class="mt-2.5 xl:mt-3 space-y-2">
+            <div class="flex flex-wrap gap-1.5 xl:gap-2">
+              <input
+                :value="pos.received || ''"
+                type="number"
+                min="0"
+                class="input !min-w-0 flex-1 basis-24"
+                placeholder="收現金額"
+                @input="pos.setReceived(Number($event.target.value) || 0)"
+                @keyup.enter="checkout"
+              />
+              <button
+                v-for="v in [100, 500, 1000]"
+                :key="v"
+                class="btn-ghost btn-sm shrink-0"
+                @click="pos.setReceived(Number(pos.received || 0) + v)"
+              >
+                +{{ v }}
+              </button>
+              <button class="btn-ghost btn-sm shrink-0" @click="pos.setReceived(pos.total)">剛好</button>
+            </div>
+            <div class="flex justify-between text-sm" :class="cashShort ? 'text-red-500' : 'text-gray-500'">
+              <span>找零</span>
+              <span class="font-extrabold text-lg">{{ fmtMoney(pos.change, catalog.currency) }}</span>
+            </div>
           </div>
         </div>
       </div>
 
       <!-- 下單（送廚房） / 結賬 -->
-      <div class="p-4 border-t border-gray-100 shrink-0 space-y-2">
+      <div class="p-3 xl:p-4 border-t border-gray-100 shrink-0 space-y-2">
         <button
           v-if="pos.pendingCount"
-          class="btn-ghost w-full py-3 text-base !border-brand-300 !text-brand-600"
+          class="btn-ghost w-full py-2.5 xl:py-3 text-sm xl:text-base !border-brand-300 !text-brand-600"
           :disabled="submitting"
           @click="submitOrder"
         >
-          {{ submitting ? '送廚中…' : `🥘 下單（送廚房）· ${pos.pendingCount} 項待送` }}
+          {{ submitting ? '送廚中…' : `🥘 下單 · ${pos.pendingCount} 項待送` }}
         </button>
-        <button class="btn-primary w-full py-3.5 text-lg" :disabled="!pos.items.length || !!pos.pendingCount" @click="checkout">
+        <button class="btn-primary w-full py-3 xl:py-3.5 text-base xl:text-lg" :disabled="!pos.items.length || !!pos.pendingCount" @click="checkout">
           💰 結賬 {{ fmtMoney(pos.total, catalog.currency) }}
         </button>
         <p v-if="pos.pendingCount" class="text-center text-xs text-gray-400">
@@ -820,25 +909,42 @@ const cashShort = computed(() => pos.paymentMethod === 'cash' && pos.received > 
       </template>
     </Modal>
 
-    <!-- ============ 改價 ============ -->
+    <!-- ============ 改價（選中列單價） ============ -->
     <Modal v-model="priceModal" title="改價" width="max-w-sm">
       <div class="space-y-4">
-        <div class="bg-gray-50 rounded-xl px-4 py-3 flex justify-between text-sm">
-          <span class="text-gray-500">目前合計</span>
-          <span class="font-extrabold">{{ fmtMoney(pos.subtotal + pos.serviceFee, catalog.currency) }}</span>
+        <div class="bg-gray-50 rounded-xl px-4 py-3 space-y-1.5 text-sm">
+          <div class="flex justify-between gap-3">
+            <span class="text-gray-500 shrink-0">品項</span>
+            <span class="font-extrabold text-right truncate">{{ pos.selectedItem?.name || '—' }}</span>
+          </div>
+          <div class="flex justify-between">
+            <span class="text-gray-500">目前單價</span>
+            <span class="font-bold">{{ fmtMoney(pos.selectedItem?.price || 0, catalog.currency) }}</span>
+          </div>
+          <div class="flex justify-between">
+            <span class="text-gray-500">數量</span>
+            <span class="font-bold">× {{ pos.selectedItem?.qty || 0 }}</span>
+          </div>
         </div>
         <div>
-          <div class="label">改為金額</div>
+          <div class="label">新單價（{{ catalog.currency }}）</div>
           <input
-            v-model="priceForm.amount"
+            ref="priceInputRef"
+            v-model.number="priceForm.price"
             type="number"
             min="0"
+            step="any"
+            inputmode="decimal"
             class="input text-lg font-extrabold"
-            placeholder="輸入新價格"
+            placeholder="輸入新單價"
+            @keyup.enter="applyPrice"
           />
         </div>
-        <div v-if="pos.subtotal + pos.serviceFee - Number(priceForm.amount || 0) > 0" class="text-sm text-red-500">
-          將折扣 −{{ fmtMoney(pos.subtotal + pos.serviceFee - Number(priceForm.amount || 0), catalog.currency) }}
+        <div class="text-sm text-gray-500 flex justify-between">
+          <span>改價後小計</span>
+          <span class="font-extrabold text-brand-600">
+            {{ fmtMoney(Math.max(0, Number(priceForm.price) || 0) * (pos.selectedItem?.qty || 0), catalog.currency) }}
+          </span>
         </div>
       </div>
       <template #footer>

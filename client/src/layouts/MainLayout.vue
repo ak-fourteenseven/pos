@@ -159,58 +159,60 @@ const pageTitle = computed(() => route.meta.title || '');
 
 <template>
   <div class="h-full flex bg-gray-100">
-    <!-- 側邊欄 -->
-    <aside class="w-60 shrink-0 bg-gray-900 text-gray-300 flex flex-col">
-      <div class="px-5 py-5 border-b border-gray-800">
-        <div class="ico-lg">🍽️</div>
-        <div class="mt-1 font-extrabold text-white leading-tight">{{ catalog.storeName }}</div>
-        <div class="text-[11px] text-gray-500">前台收銀</div>
+    <!-- 側邊欄：≤1280（含 4:3 POS）收成圖示欄，寬螢幕還原完整標籤 -->
+    <aside class="w-[4.5rem] xl:w-60 shrink-0 bg-gray-900 text-gray-300 flex flex-col">
+      <div class="px-2 py-4 xl:px-5 xl:py-5 border-b border-gray-800 text-center xl:text-left">
+        <div class="ico-lg mx-auto xl:mx-0">🍽️</div>
+        <div class="mt-1 font-extrabold text-white leading-tight hidden xl:block truncate" :title="catalog.storeName">{{ catalog.storeName }}</div>
+        <div class="text-[11px] text-gray-500 hidden xl:block">前台收銀</div>
       </div>
 
-      <nav class="flex-1 overflow-y-auto py-4">
-        <div class="px-4 mb-1 text-[11px] font-bold text-gray-500 uppercase tracking-wider">前台</div>
+      <nav class="flex-1 overflow-y-auto overflow-x-hidden py-3 xl:py-4">
+        <div class="px-4 mb-1 text-[11px] font-bold text-gray-500 uppercase tracking-wider hidden xl:block">前台</div>
         <router-link
           v-for="n in navFront"
           :key="n.path"
           :to="n.path"
-          class="flex items-center gap-3 mx-2 px-3 py-2.5 rounded-lg text-sm font-bold transition"
+          :title="n.title"
+          class="flex items-center justify-center xl:justify-start gap-3 mx-1.5 xl:mx-2 px-2 xl:px-3 py-2.5 rounded-lg text-sm font-bold transition"
           :class="route.path.startsWith(n.path) ? 'bg-brand-500 text-white' : 'hover:bg-gray-800'"
         >
-          <span class="ico">{{ n.icon }}</span>{{ n.title }}
+          <span class="ico">{{ n.icon }}</span>
+          <span class="hidden xl:inline">{{ n.title }}</span>
         </router-link>
         <button
-          class="w-full flex items-center gap-3 mx-2 px-3 py-2.5 rounded-lg text-sm font-bold transition hover:bg-gray-800 text-left"
+          title="今日訂單"
+          class="flex items-center justify-center xl:justify-start gap-3 mx-1.5 xl:mx-2 px-2 xl:px-3 py-2.5 rounded-lg text-sm font-bold transition hover:bg-gray-800 text-left w-[calc(100%-0.75rem)] xl:w-auto"
           @click="openOrders"
         >
-          <span class="ico">📋</span>今日訂單
+          <span class="ico">📋</span>
+          <span class="hidden xl:inline">今日訂單</span>
         </button>
       </nav>
 
-      <div class="px-5 py-3 border-t border-gray-800 text-[11px] text-gray-500">
-        報表與設定請至後台管理系統<br />資料儲存於本地 SQLite
-      </div>
     </aside>
 
     <!-- 主區 -->
-    <div class="flex-1 flex flex-col min-w-0">
-      <header class="h-14 bg-white border-b border-gray-200 flex items-center px-5 gap-3 shrink-0">
-        <h1 class="text-lg font-extrabold">{{ pageTitle }}</h1>
+    <div class="flex-1 flex flex-col min-w-0 min-h-0">
+      <header class="h-12 xl:h-14 bg-white border-b border-gray-200 flex items-center px-3 xl:px-5 gap-2 xl:gap-3 shrink-0">
+        <h1 class="text-base xl:text-lg font-extrabold truncate">{{ pageTitle }}</h1>
         <div class="flex-1" />
         <button
-          class="btn-ghost btn-sm"
+          class="btn-ghost btn-sm shrink-0"
           :class="shift.current ? '!border-emerald-300 !text-emerald-600' : ''"
           @click="shiftModal = true"
         >
           <span class="w-2 h-2 rounded-full" :class="shift.current ? 'bg-emerald-500' : 'bg-gray-300'" />
-          {{ shift.current ? `交接班中 ${fmtTime(shift.current.start_time)}` : '未開始交接班' }}
+          <span class="hidden sm:inline">{{ shift.current ? `交接班中 ${fmtTime(shift.current.start_time)}` : '未開始交接班' }}</span>
+          <span class="sm:hidden">{{ shift.current ? '交班中' : '未交班' }}</span>
         </button>
-        <div class="chip bg-gray-100 text-gray-600">
-          {{ auth.user?.name }}（{{ auth.user?.role === 'manager' ? '店長' : '收銀員' }}）
+        <div class="chip bg-gray-100 text-gray-600 shrink-0 max-w-[9rem] xl:max-w-none truncate">
+          {{ auth.user?.name }}<span class="hidden md:inline">（{{ auth.user?.role === 'manager' ? '店長' : '收銀員' }}）</span>
         </div>
-        <button class="btn-ghost btn-sm" @click="logout">登出</button>
+        <button class="btn-ghost btn-sm shrink-0" @click="logout">登出</button>
       </header>
 
-      <main class="flex-1 overflow-hidden">
+      <main class="flex-1 overflow-hidden min-h-0">
         <router-view />
       </main>
     </div>
