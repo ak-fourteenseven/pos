@@ -55,6 +55,9 @@ function check(name, ok, extra = '') {
   await page.fill('input[placeholder="請輸入帳號"]', 'admin');
   await page.fill('input[type="password"]', '123456');
   await page.click('button[type="submit"]');
+  await page.waitForURL((url) => new URL(url).pathname === '/', { timeout: 8000 }).catch(() => {});
+  await page.waitForTimeout(800);
+  await page.click('button:has-text("收銀台")');
   await page.waitForURL('**/pos', { timeout: 8000 });
   await page.waitForTimeout(1500);
 

@@ -6,7 +6,7 @@ import { useToastStore } from '@shared/stores/toast';
 
 const props = defineProps({
   /** 登录成功后的跳转目标 */
-  redirect: { type: String, default: '/pos' },
+  redirect: { type: String, default: '/' },
   heading: { type: String, default: '本地 POS 收銀系統' },
   sub: { type: String, default: '資料儲存於本地 SQLite · 斷網可用 · 無雲端訂閱' },
   hint: { type: String, default: '店長 admin（完整權限） · 收銀員 cashier / cashier2' },

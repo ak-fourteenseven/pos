@@ -13,7 +13,7 @@ const toast = useToastStore();
 
 /** 后台管理：报表与所有设置项 */
 const navAdmin = [
-  { path: '/reports', title: '報表統計', icon: '📊' },
+  { path: '/admin/reports', title: '報表統計', icon: '📊' },
   { path: '/admin/products', title: '菜品管理', icon: '🍱' },
   { path: '/admin/tables', title: '桌台管理', icon: '🪑' },
   { path: '/admin/payments', title: '支付方式', icon: '💳' },
@@ -60,8 +60,11 @@ const pageTitle = computed(() => route.meta.title || '');
         </router-link>
       </nav>
 
-      <div class="px-5 py-3 border-t border-gray-800 text-[11px] text-gray-500">
-        前台收銀請使用收銀台應用<br />資料儲存於本地 SQLite
+      <div class="px-5 py-3 border-t border-gray-800 space-y-2">
+        <router-link to="/" class="flex items-center gap-2 text-sm font-bold text-gray-400 hover:text-white transition">
+          ← 返回首頁
+        </router-link>
+        <div class="text-[11px] text-gray-500">資料儲存於本地 SQLite</div>
       </div>
     </aside>
 

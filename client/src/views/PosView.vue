@@ -41,6 +41,152 @@ const products = computed(() => {
   return list;
 });
 
+/* ---------------- 菜品／操作分頁網格 ---------------- */
+const actionPaneRef = ref(null);
+const productPage = ref(0);
+const payPage = ref(0);
+const opPage = ref(0);
+/** 菜品固定 5×5；超過 25 時右下角為翻頁（每頁 24 項） */
+const PRODUCT_COLS = 5;
+const PRODUCT_ROWS = 5;
+const PRODUCT_CAPACITY = PRODUCT_COLS * PRODUCT_ROWS;
+/** 操作列：左操作 5×2=10，右支付 4×2=8 */
+const PAY_COLS = 4;
+const PAY_ROWS = 2;
+const PAY_CAPACITY = PAY_COLS * PAY_ROWS;
+const OP_COLS = 5;
+const OP_ROWS = 2;
+const OP_CAPACITY = OP_COLS * OP_ROWS;
+const actionCellSize = ref(48);
+
+const ACTION_GAP = 6;
+const ACTION_SECTION_GAP = 10;
+const ACTION_MIN_SIZE = 40;
+
+function pageMeta(total, capacity, page) {
+  const needsPager = total > capacity && capacity > 0;
+  const perPage = needsPager ? Math.max(1, capacity - 1) : Math.max(1, capacity || 1);
+  const totalPages = Math.max(1, Math.ceil(total / perPage));
+  const safePage = Math.min(Math.max(0, page), totalPages - 1);
+  const start = safePage * perPage;
+  return {
+    needsPager,
+    perPage,
+    totalPages,
+    page: safePage,
+    start,
+    end: start + perPage,
+    canPrev: safePage > 0,
+    canNext: safePage < totalPages - 1,
+  };
+}
+
+const productPageMeta = computed(() => pageMeta(products.value.length, PRODUCT_CAPACITY, productPage.value));
+const pagedProducts = computed(() => products.value.slice(productPageMeta.value.start, productPageMeta.value.end));
+/** 本頁剩餘空白格（含翻頁格時扣 1） */
+const productEmptySlots = computed(() => {
+  const slots = productPageMeta.value.needsPager ? PRODUCT_CAPACITY - 1 : PRODUCT_CAPACITY;
+  return Math.max(0, slots - pagedProducts.value.length);
+});
+
+const paymentItems = computed(() =>
+  (catalog.enabledPayments || []).map((pm) => ({ type: 'payment', id: `pay-${pm.id}`, pm })),
+);
+const opItems = computed(() => [
+  { type: 'price', id: 'price', icon: '改', label: '改價' },
+  { type: 'tables', id: 'tables', icon: '🪑', label: '桌台' },
+  { type: 'move', id: 'move', icon: '🔄', label: '換桌', disabled: !pos.tableId },
+  {
+    type: 'void',
+    id: 'void',
+    icon: '🚫',
+    label: '作廢',
+    danger: true,
+    disabled: !(pos.hasServerOrder && auth.isManager),
+  },
+  {
+    type: 'reprint',
+    id: 'reprint',
+    icon: '🖨️',
+    label: '補印',
+    disabled: !pos.hasServerOrder,
+  },
+  {
+    type: 'split',
+    id: 'split',
+    icon: '✂️',
+    label: '分單',
+    disabled: !(pos.hasServerOrder && pos.items.length > 1),
+  },
+]);
+
+const payPageMeta = computed(() => pageMeta(paymentItems.value.length, PAY_CAPACITY, payPage.value));
+const pagedPayments = computed(() => paymentItems.value.slice(payPageMeta.value.start, payPageMeta.value.end));
+const payEmptySlots = computed(() => {
+  const slots = payPageMeta.value.needsPager ? PAY_CAPACITY - 1 : PAY_CAPACITY;
+  return Math.max(0, slots - pagedPayments.value.length);
+});
+
+const opPageMeta = computed(() => pageMeta(opItems.value.length, OP_CAPACITY, opPage.value));
+const pagedOps = computed(() => opItems.value.slice(opPageMeta.value.start, opPageMeta.value.end));
+const opEmptySlots = computed(() => {
+  const slots = opPageMeta.value.needsPager ? OP_CAPACITY - 1 : OP_CAPACITY;
+  return Math.max(0, slots - pagedOps.value.length);
+});
+
+function onActionClick(item) {
+  if (item.disabled) {
+    if (item.type === 'move') toast.error('目前不是桌台單，無法換桌');
+    else if (item.type === 'void') toast.error(auth.isManager ? '尚無訂單可作廢' : '作廢需店長權限');
+    else if (item.type === 'reprint') toast.error('尚未下單，無廚房單可補印');
+    else if (item.type === 'split') toast.error('需已下單且購物車超過 1 項才能分單');
+    return;
+  }
+  if (item.type === 'payment') pos.setPayment(item.pm.code);
+  else if (item.type === 'price') openPriceModal();
+  else if (item.type === 'tables') router.push('/tables');
+  else if (item.type === 'move') moveModal.value = true;
+  else if (item.type === 'void') voidModal.value = true;
+  else if (item.type === 'reprint') reprintTicket();
+  else if (item.type === 'split') openSplit();
+}
+
+function gridWidth(cols, cell) {
+  return cols * cell + ACTION_GAP * Math.max(0, cols - 1);
+}
+
+function measureActionGrid() {
+  const pane = actionPaneRef.value;
+  if (!pane) return;
+  const style = getComputedStyle(pane);
+  const padX = (parseFloat(style.paddingLeft) || 0) + (parseFloat(style.paddingRight) || 0);
+  const padY = (parseFloat(style.paddingTop) || 0) + (parseFloat(style.paddingBottom) || 0);
+  const w = Math.max(0, pane.clientWidth - padX);
+  const h = Math.max(0, pane.clientHeight - padY);
+  let cell = Math.max(
+    ACTION_MIN_SIZE,
+    Math.floor((h - ACTION_GAP * (PAY_ROWS - 1)) / PAY_ROWS),
+  );
+  while (
+    cell > ACTION_MIN_SIZE
+    && gridWidth(PAY_COLS, cell) + ACTION_SECTION_GAP + gridWidth(OP_COLS, cell) > w
+  ) {
+    cell -= 1;
+  }
+  actionCellSize.value = Math.max(1, cell);
+  if (payPage.value >= pageMeta(paymentItems.value.length, PAY_CAPACITY, payPage.value).totalPages) {
+    payPage.value = 0;
+  }
+  if (opPage.value >= pageMeta(opItems.value.length, OP_CAPACITY, opPage.value).totalPages) {
+    opPage.value = 0;
+  }
+}
+
+let gridObserver = null;
+watch([products, () => activeCategory.value, keyword], () => { productPage.value = 0; });
+watch(paymentItems, () => { payPage.value = 0; });
+watch(opItems, () => { opPage.value = 0; });
+
 /* ---------------- 時段（飲品計價） ---------------- */
 /** 每 10 秒更新一次時間戳，帶動時段重新計算（跨時段邊界即時切換） */
 const nowTick = ref(Date.now());
@@ -49,8 +195,16 @@ const nowSlot = computed(() => currentSlot(catalog.timeSlots, new Date(nowTick.v
 let slotTimer = null;
 onMounted(() => {
   slotTimer = setInterval(() => { nowTick.value = Date.now(); }, 10000);
+  gridObserver = new ResizeObserver(() => measureActionGrid());
+  requestAnimationFrame(() => {
+    if (actionPaneRef.value) gridObserver.observe(actionPaneRef.value);
+    measureActionGrid();
+  });
 });
-onUnmounted(() => clearInterval(slotTimer));
+onUnmounted(() => {
+  clearInterval(slotTimer);
+  gridObserver?.disconnect();
+});
 
 /* ---------------- 彈窗狀態 ---------------- */
 const specModal = ref(false);
@@ -66,7 +220,8 @@ const splitModal = ref(false);
 const splitForm = ref({ selectedIds: [], tableId: null });
 const priceModal = ref(false);
 const priceForm = ref({ price: 0 });
-const priceInputRef = ref(null);
+const priceDigits = ref('');
+const cashPayModal = ref(false);
 const wizardProduct = ref(null);
 const drinkProduct = ref(null);
 const receiptTab = ref('customer');
@@ -77,14 +232,52 @@ const ticket = ref(null);
 onMounted(async () => {
   try {
     await catalog.loadAll();
+    requestAnimationFrame(() => measureActionGrid());
   } catch (e) {
     toast.error(e.message);
   }
 });
 
+const receivedDigits = ref('');
+const NUM_PAD_KEYS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'C', '0', '⌫'];
+
 watch(() => pos.paymentMethod, (m) => {
-  if (m !== 'cash') pos.setReceived(0);
+  if (m !== 'cash') {
+    pos.setReceived(0);
+    receivedDigits.value = '';
+    cashPayModal.value = false;
+  }
 });
+
+/** 通用數字鍵盤：寫入 digits ref，並回呼數值 */
+function applyNumPad(digitsRef, key, onValue, maxLen = 8) {
+  let d = digitsRef.value;
+  if (key === 'C') d = '';
+  else if (key === '⌫') d = d.slice(0, -1);
+  else if (d.length < maxLen) d = d === '0' ? key : `${d}${key}`;
+  digitsRef.value = d;
+  onValue?.(Number(d) || 0);
+}
+
+function onPriceNumPad(key) {
+  applyNumPad(priceDigits, key, (v) => { priceForm.value.price = v; });
+}
+
+function onCashNumPad(key) {
+  applyNumPad(receivedDigits, key, (v) => pos.setReceived(v));
+}
+
+function addQuickAmount(v) {
+  const next = Number(pos.received || 0) + v;
+  pos.setReceived(next);
+  receivedDigits.value = String(next);
+}
+
+function setExactAmount() {
+  const exact = Number(pos.total) || 0;
+  pos.setReceived(exact);
+  receivedDigits.value = String(exact);
+}
 
 /* ---------------- 加菜 ---------------- */
 function onProduct(p) {
@@ -240,6 +433,33 @@ async function reprintTicket() {
 }
 
 /* ---------------- 結帳 / 作廢 ---------------- */
+function requestCheckout() {
+  if (!pos.items.length) {
+    toast.error('購物車為空');
+    return;
+  }
+  if (pos.pendingCount > 0) {
+    toast.error('請先「下單」送廚房，顧客用餐後再結賬');
+    return;
+  }
+  if (pos.paymentMethod === 'cash') {
+    receivedDigits.value = pos.received ? String(pos.received) : '';
+    if (!pos.received) pos.setReceived(0);
+    cashPayModal.value = true;
+    return;
+  }
+  checkout();
+}
+
+async function confirmCashPay() {
+  if (pos.received < pos.total) {
+    toast.error('收現金額不足');
+    return;
+  }
+  cashPayModal.value = false;
+  await checkout();
+}
+
 async function checkout() {
   if (!pos.items.length) {
     toast.error('購物車為空');
@@ -255,6 +475,8 @@ async function checkout() {
   }
   try {
     receipt.value = await pos.checkout();
+    receivedDigits.value = '';
+    cashPayModal.value = false;
     await catalog.reloadTables();
   } catch (e) {
     toast.error(e.message);
@@ -355,15 +577,10 @@ function openPriceModal() {
     toast.error('請先在購物車選取要改價的項目');
     return;
   }
-  priceForm.value = { price: Number(item.price) || 0 };
+  const p = Number(item.price) || 0;
+  priceForm.value = { price: p };
+  priceDigits.value = p ? String(p) : '';
   priceModal.value = true;
-  requestAnimationFrame(() => {
-    const el = priceInputRef.value;
-    if (el) {
-      el.focus();
-      el.select?.();
-    }
-  });
 }
 async function applyPrice() {
   const item = pos.selectedItem;
@@ -399,6 +616,14 @@ function paymentMeta(m) {
   return PAYMENT_META[m] || { label: m, icon: '💰' };
 }
 
+/** 單號縮短顯示：POS20261121-0002 → #0002；下單送廚後才顯示 */
+function shortOrderNo(no) {
+  if (!no) return '';
+  const m = String(no).match(/-(\d+)$/);
+  return m ? `#${m[1]}` : `#${String(no).slice(-4)}`;
+}
+const showOrderNo = computed(() => !!pos.orderNo && pos.items.some((i) => i.sent));
+
 const cashShort = computed(() => pos.paymentMethod === 'cash' && pos.received > 0 && pos.received < pos.total);
 </script>
 
@@ -412,11 +637,13 @@ const cashShort = computed(() => pos.paymentMethod === 'cash' && pos.received > 
         <div class="flex items-center gap-1.5 xl:gap-2 pr-2 xl:pr-3 mr-0.5 xl:mr-1 border-r border-gray-200 min-w-0">
           <span
             class="chip !gap-1.5 !px-2.5 xl:!px-3 !py-1 !text-xs xl:!text-[13px] max-w-[14rem] xl:max-w-none truncate"
-            :class="pos.tableId ? 'bg-brand-100 text-brand-700' : pos.hasServerOrder ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-600'"
+            :class="pos.tableId ? 'bg-brand-100 text-brand-700' : showOrderNo ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-600'"
           >
             <span class="ico">{{ pos.tableId ? '🪑' : '🥡' }}</span>
-            <template v-if="pos.tableId">桌台 {{ pos.tableNumber }} · {{ pos.orderNo }}</template>
-            <template v-else-if="pos.hasServerOrder">外帶 / 快餐 · {{ pos.orderNo }}</template>
+            <template v-if="pos.tableId">
+              {{ pos.tableNumber }}<template v-if="showOrderNo"> · {{ shortOrderNo(pos.orderNo) }}</template>
+            </template>
+            <template v-else-if="showOrderNo">外帶 / 快餐 · {{ shortOrderNo(pos.orderNo) }}</template>
             <template v-else>快餐模式（未開台）</template>
           </span>
           <span
@@ -430,27 +657,11 @@ const cashShort = computed(() => pos.paymentMethod === 'cash' && pos.received > 
           </span>
         </div>
 
-        <!-- 中：輔助操作 -->
-        <div class="flex items-center gap-1.5 xl:gap-2 flex-wrap">
-          <button class="btn-ghost btn-sm" @click="router.push('/tables')"><span class="ico">🪑</span><span class="hidden lg:inline">桌台視圖</span></button>
-          <button v-if="pos.tableId" class="btn-ghost btn-sm" @click="moveModal = true"><span class="ico">🔄</span><span class="hidden lg:inline">換桌</span></button>
-          <button v-if="pos.hasServerOrder && pos.items.length > 1" class="btn-ghost btn-sm" @click="openSplit"><span class="ico">✂️</span><span class="hidden lg:inline">分單</span></button>
-          <button v-if="pos.hasServerOrder && auth.isManager" class="btn-ghost btn-sm !text-red-500 hover:!bg-red-50" @click="voidModal = true"><span class="ico">🚫</span><span class="hidden lg:inline">作廢</span></button>
-        </div>
-
         <div class="flex-1 min-w-2" />
 
-        <!-- 右：時段資訊 + 主要動作 -->
+        <!-- 右：時段資訊（操作鈕已移至下方面板） -->
         <span class="chip !gap-1.5 !px-2.5 xl:!px-3 !py-1 !text-xs xl:!text-[13px] bg-amber-100 text-amber-700 max-w-[10rem] xl:max-w-none truncate"><span class="ico">🕐</span>{{ slotRuleText(nowSlot) }}</span>
         <span v-if="catalog.serviceRate > 0" class="chip !gap-1.5 !px-2.5 xl:!px-3 !py-1 !text-xs xl:!text-[13px] bg-amber-100 text-amber-700 hidden xl:inline-flex"><span class="ico">💁</span>服務費 {{ catalog.serviceRate }}%</span>
-        <button class="btn-ghost btn-sm" :disabled="!pos.hasServerOrder" @click="reprintTicket"><span class="ico">🖨️</span><span class="hidden xl:inline">廚房單補印</span></button>
-        <button
-          class="btn-primary btn-sm !px-3 xl:!px-4 !py-2 !text-sm"
-          :disabled="!pos.pendingCount || submitting"
-          @click="submitOrder"
-        >
-          <span class="ico">🥘</span>{{ submitting ? '送廚中…' : '下單' }}<span class="hidden xl:inline">（送廚房）</span>
-        </button>
       </div>
 
       <!-- 分類 -->
@@ -475,41 +686,209 @@ const cashShort = computed(() => pos.paymentMethod === 'cash' && pos.received > 
         <input v-model="keyword" class="input !w-28 xl:!w-44 !py-1 shrink-0" placeholder="搜尋…" />
       </div>
 
-      <!-- 菜品網格 -->
-      <div class="flex-1 overflow-y-auto p-2.5 xl:p-4 min-h-0">
-        <div class="pos-product-grid">
-          <button
-            v-for="p in products"
-            :key="p.id"
-            class="relative rounded-2xl border-2 p-2.5 xl:p-3 text-left transition active:scale-95 hover:shadow-md min-w-0"
-            :style="{
-              borderColor: hexA(p.color, 0.35),
-              background: hexA(p.color, 0.07),
-            }"
-            @click="onProduct(p)"
-          >
-            <div class="text-3xl xl:text-4xl text-center leading-none py-1.5 xl:py-2">{{ p.emoji }}</div>
-            <div class="mt-1.5 xl:mt-2 font-bold text-sm xl:text-base text-gray-800 truncate" :title="p.name">{{ p.name }}</div>
-            <div class="flex items-center justify-between mt-0.5 gap-1 min-w-0">
-              <span class="font-extrabold text-sm xl:text-base truncate" :style="{ color: p.color }">{{ fmtMoney(p.price, catalog.currency) }}</span>
-              <span v-if="p.kind === 'combo'" class="chip bg-brand-100 text-brand-700 text-[10px] shrink-0">套餐</span>
-              <span v-else-if="Number(p.is_drink) === 1" class="chip bg-sky-100 text-sky-700 text-[10px] shrink-0">飲品</span>
-              <span v-else-if="p.steps && p.steps.length" class="chip bg-violet-100 text-violet-700 text-[10px] shrink-0">選口味</span>
+      <!-- 上 78% 菜品 / 下 22% 支付與操作（滿格時右下角為翻頁） -->
+      <div class="flex-1 flex flex-col min-h-0">
+        <div class="basis-[78%] min-h-0 overflow-hidden p-2 xl:p-2.5">
+          <div class="pos-product-grid">
+            <!-- 先佔住右下角（第 25 格），避免自動排版蓋住翻頁 -->
+            <div
+              v-if="productPageMeta.needsPager"
+              class="rounded-xl border-2 border-gray-200 bg-white min-w-0 min-h-0 overflow-hidden flex"
+              :style="{ gridColumn: PRODUCT_COLS, gridRow: PRODUCT_ROWS }"
+            >
+              <button
+                type="button"
+                class="flex-1 font-extrabold text-lg xl:text-xl text-gray-600 transition hover:bg-brand-50 hover:text-brand-600 disabled:text-gray-300 disabled:hover:bg-transparent"
+                :disabled="!productPageMeta.canPrev"
+                @click="productPage = Math.max(0, productPage - 1)"
+              >‹</button>
+              <div class="w-px self-stretch bg-gray-200" />
+              <button
+                type="button"
+                class="flex-1 font-extrabold text-lg xl:text-xl text-gray-600 transition hover:bg-brand-50 hover:text-brand-600 disabled:text-gray-300 disabled:hover:bg-transparent"
+                :disabled="!productPageMeta.canNext"
+                @click="productPage += 1"
+              >›</button>
             </div>
-            <div v-if="Number(p.is_available) !== 1" class="absolute inset-0 bg-white/70 rounded-2xl flex items-center justify-center font-extrabold text-gray-400">
-              售罄
-            </div>
-          </button>
+
+            <button
+              v-for="p in pagedProducts"
+              :key="p.id"
+              class="relative rounded-xl border-2 px-1.5 pt-1 pb-1 text-left transition active:scale-95 hover:shadow-md min-w-0 min-h-0 overflow-hidden flex flex-col"
+              :style="{
+                borderColor: hexA(p.color, 0.35),
+                background: hexA(p.color, 0.07),
+              }"
+              @click="onProduct(p)"
+            >
+              <div class="flex-1 min-h-0 flex items-center justify-center text-2xl xl:text-3xl leading-none">{{ p.emoji }}</div>
+              <div class="shrink-0 min-w-0 leading-none">
+                <div class="font-bold text-[11px] xl:text-xs text-gray-800 truncate" :title="p.name">{{ p.name }}</div>
+                <div class="flex items-center justify-between gap-0.5 min-w-0 mt-0.5">
+                  <span class="font-extrabold text-[11px] xl:text-xs truncate leading-none" :style="{ color: p.color }">{{ fmtMoney(p.price, catalog.currency) }}</span>
+                  <span v-if="p.kind === 'combo'" class="chip !px-1 !py-0 bg-brand-100 text-brand-700 text-[9px] shrink-0">套餐</span>
+                  <span v-else-if="Number(p.is_drink) === 1" class="chip !px-1 !py-0 bg-sky-100 text-sky-700 text-[9px] shrink-0">飲品</span>
+                  <span v-else-if="p.steps && p.steps.length" class="chip !px-1 !py-0 bg-violet-100 text-violet-700 text-[9px] shrink-0">選口味</span>
+                </div>
+              </div>
+              <div v-if="Number(p.is_available) !== 1" class="absolute inset-0 bg-white/70 rounded-xl flex items-center justify-center font-extrabold text-gray-400 text-xs">
+                售罄
+              </div>
+            </button>
+
+            <div
+              v-for="n in productEmptySlots"
+              :key="`product-empty-${n}`"
+              class="rounded-xl border-2 border-dashed border-gray-200 bg-gray-50/60 min-w-0 min-h-0"
+              aria-hidden="true"
+            />
+          </div>
         </div>
-        <div v-if="!products.length" class="text-center text-gray-300 py-16">沒有符合的菜品</div>
+
+        <div
+          ref="actionPaneRef"
+          class="basis-[22%] min-h-0 overflow-hidden border-t border-gray-200 bg-white px-2 xl:px-2.5 py-1 flex items-center justify-center gap-2.5"
+        >
+          <!-- 左：操作 5×2 = 10 -->
+          <div
+            class="pos-action-grid shrink-0"
+            :style="{
+              gridTemplateColumns: `repeat(${OP_COLS}, ${actionCellSize}px)`,
+              gridTemplateRows: `repeat(${OP_ROWS}, ${actionCellSize}px)`,
+            }"
+          >
+            <div
+              v-if="opPageMeta.needsPager"
+              class="rounded-xl border-2 border-gray-200 bg-white overflow-hidden flex box-border"
+              :style="{
+                width: `${actionCellSize}px`,
+                height: `${actionCellSize}px`,
+                gridColumn: OP_COLS,
+                gridRow: OP_ROWS,
+              }"
+            >
+              <button
+                type="button"
+                class="flex-1 font-extrabold text-lg text-gray-600 transition hover:bg-brand-50 hover:text-brand-600 disabled:text-gray-300 disabled:hover:bg-transparent"
+                :disabled="!opPageMeta.canPrev"
+                @click="opPage = Math.max(0, opPage - 1)"
+              >‹</button>
+              <div class="w-px self-stretch bg-gray-200" />
+              <button
+                type="button"
+                class="flex-1 font-extrabold text-lg text-gray-600 transition hover:bg-brand-50 hover:text-brand-600 disabled:text-gray-300 disabled:hover:bg-transparent"
+                :disabled="!opPageMeta.canNext"
+                @click="opPage += 1"
+              >›</button>
+            </div>
+
+            <button
+              v-for="item in pagedOps"
+              :key="item.id"
+              type="button"
+              class="rounded-xl border-2 text-center transition active:scale-95 flex flex-col items-center justify-center gap-0.5 px-1 overflow-hidden box-border"
+              :class="[
+                item.disabled ? 'opacity-40' : '',
+                item.danger
+                  ? 'border-red-200 hover:border-red-400 hover:bg-red-50'
+                  : 'border-gray-200 hover:border-brand-300',
+              ]"
+              :style="{ width: `${actionCellSize}px`, height: `${actionCellSize}px` }"
+              @click="onActionClick(item)"
+            >
+              <div class="text-sm font-extrabold leading-none" :class="item.danger ? 'text-red-500' : ''">{{ item.icon }}</div>
+              <div class="text-[10px] font-bold leading-tight" :class="item.danger ? 'text-red-500' : ''">{{ item.label }}</div>
+            </button>
+
+            <div
+              v-for="n in opEmptySlots"
+              :key="`op-empty-${n}`"
+              class="rounded-xl border-2 border-dashed border-gray-200 bg-gray-50/60 box-border"
+              :style="{ width: `${actionCellSize}px`, height: `${actionCellSize}px` }"
+              aria-hidden="true"
+            />
+          </div>
+
+          <div class="w-px self-stretch bg-gray-200 shrink-0" aria-hidden="true" />
+
+          <!-- 右：支付 4×2 = 8 -->
+          <div
+            class="pos-action-grid shrink-0"
+            :style="{
+              gridTemplateColumns: `repeat(${PAY_COLS}, ${actionCellSize}px)`,
+              gridTemplateRows: `repeat(${PAY_ROWS}, ${actionCellSize}px)`,
+            }"
+          >
+            <div
+              v-if="payPageMeta.needsPager"
+              class="rounded-xl border-2 border-gray-200 bg-white overflow-hidden flex box-border"
+              :style="{
+                width: `${actionCellSize}px`,
+                height: `${actionCellSize}px`,
+                gridColumn: PAY_COLS,
+                gridRow: PAY_ROWS,
+              }"
+            >
+              <button
+                type="button"
+                class="flex-1 font-extrabold text-lg text-gray-600 transition hover:bg-brand-50 hover:text-brand-600 disabled:text-gray-300 disabled:hover:bg-transparent"
+                :disabled="!payPageMeta.canPrev"
+                @click="payPage = Math.max(0, payPage - 1)"
+              >‹</button>
+              <div class="w-px self-stretch bg-gray-200" />
+              <button
+                type="button"
+                class="flex-1 font-extrabold text-lg text-gray-600 transition hover:bg-brand-50 hover:text-brand-600 disabled:text-gray-300 disabled:hover:bg-transparent"
+                :disabled="!payPageMeta.canNext"
+                @click="payPage += 1"
+              >›</button>
+            </div>
+
+            <button
+              v-for="item in pagedPayments"
+              :key="item.id"
+              type="button"
+              class="rounded-xl border-2 text-center transition active:scale-95 flex flex-col items-center justify-center gap-0.5 px-1 overflow-hidden box-border"
+              :class="pos.paymentMethod === item.pm.code
+                ? 'border-brand-500 bg-brand-50'
+                : 'border-gray-200 hover:border-brand-300'"
+              :style="{ width: `${actionCellSize}px`, height: `${actionCellSize}px` }"
+              @click="onActionClick(item)"
+            >
+              <img
+                v-if="paymentMeta(item.pm.code).img"
+                :src="paymentMeta(item.pm.code).icon"
+                :alt="item.pm.name"
+                class="h-7 w-7 object-contain shrink-0"
+              />
+              <div
+                v-else
+                class="text-base leading-none flex items-center justify-center"
+                v-html="paymentMeta(item.pm.code).icon"
+              />
+              <div class="text-[10px] font-bold leading-tight truncate max-w-full">{{ item.pm.name }}</div>
+              <div v-if="Number(item.pm.fee_rate) > 0" class="text-[9px] text-gray-400 leading-tight truncate max-w-full">
+                {{ (item.pm.fee_rate * 100).toFixed(1) }}%
+              </div>
+            </button>
+
+            <div
+              v-for="n in payEmptySlots"
+              :key="`pay-empty-${n}`"
+              class="rounded-xl border-2 border-dashed border-gray-200 bg-gray-50/60 box-border"
+              :style="{ width: `${actionCellSize}px`, height: `${actionCellSize}px` }"
+              aria-hidden="true"
+            />
+          </div>
+        </div>
       </div>
     </section>
 
-    <!-- 右：購物車 / 結帳面板（4:3 收窄；短高時金額/支付可捲，結賬固定） -->
+    <!-- 右：購物車 / 結帳面板（僅購物車列表可捲；金額與鍵盤固定可見） -->
     <aside class="w-[300px] xl:w-[340px] 2xl:w-[380px] shrink-0 bg-white border-l border-gray-200 flex flex-col min-h-0">
-      <div class="px-3 xl:px-4 py-2.5 xl:py-3 border-b border-gray-100 flex items-center justify-between shrink-0">
-        <span class="font-extrabold">購物車</span>
-        <span class="chip bg-gray-100 text-gray-500">{{ pos.count }} 件</span>
+      <div class="px-2.5 xl:px-3 py-2 border-b border-gray-100 flex items-center justify-between shrink-0">
+        <span class="font-extrabold text-sm">購物車</span>
+        <span class="chip bg-gray-100 text-gray-500 !text-xs">{{ pos.count }} 件</span>
       </div>
 
       <!-- 明細 -->
@@ -612,93 +991,40 @@ const cashShort = computed(() => pos.paymentMethod === 'cash' && pos.received > 
         </div>
       </div>
 
-      <!-- 金額 + 支付：短螢幕可捲動；結賬鈕固定在下方 -->
-      <div class="shrink-0 max-h-[46%] overflow-y-auto border-t border-gray-100">
-        <div class="px-3 xl:px-4 py-2.5 xl:py-3 space-y-1.5 text-sm">
-          <div class="flex justify-between text-gray-500">
-            <span>小計</span>
-            <span>{{ fmtMoney(pos.subtotal, catalog.currency) }}</span>
-          </div>
-          <button class="flex justify-between w-full text-gray-500 hover:text-brand-500" @click="openDiscount">
-            <span>折扣{{ pos.discountLabel ? `（${pos.discountLabel}）` : '' }}</span>
-            <span :class="pos.discount > 0 ? 'text-red-500 font-bold' : ''">−{{ fmtMoney(pos.discount, catalog.currency) }}</span>
-          </button>
-          <div v-if="catalog.serviceRate > 0" class="flex justify-between text-gray-500">
-            <span>服務費（{{ catalog.serviceRate }}%）</span>
-            <span>{{ fmtMoney(pos.serviceFee, catalog.currency) }}</span>
-          </div>
-          <div class="flex justify-between items-end pt-1">
-            <span class="font-extrabold">應收總額</span>
-            <span class="text-xl xl:text-2xl font-extrabold text-brand-600">{{ fmtMoney(pos.total, catalog.currency) }}</span>
-          </div>
+      <!-- 金額摘要：固定不捲動；數字鍵盤改在改價／現金結賬彈窗 -->
+      <div class="shrink-0 overflow-hidden border-t border-gray-100 px-2.5 xl:px-3 py-1.5 space-y-0.5 text-xs">
+        <div class="flex justify-between gap-2 text-gray-500">
+          <span>小計</span>
+          <span class="tabular-nums">{{ fmtMoney(pos.subtotal, catalog.currency) }}</span>
         </div>
-
-        <div class="border-t border-gray-100 px-3 xl:px-4 py-2.5 xl:py-3">
-          <div class="grid grid-cols-4 gap-1.5 xl:gap-2">
-            <button
-              v-for="pm in catalog.enabledPayments"
-              :key="pm.id"
-              class="rounded-xl border-2 py-1.5 xl:py-2 text-center transition active:scale-95 min-w-0"
-              :class="pos.paymentMethod === pm.code ? 'border-brand-500 bg-brand-50' : 'border-gray-200'"
-              @click="pos.setPayment(pm.code)"
-            >
-              <div class="ico-lg mx-auto flex items-center justify-center" v-html="paymentMeta(pm.code).icon" />
-              <div class="text-[10px] xl:text-xs font-bold mt-0.5 truncate">{{ pm.name }}</div>
-              <div v-if="Number(pm.fee_rate) > 0" class="text-[10px] text-gray-400 truncate">費率{{ (pm.fee_rate * 100).toFixed(1) }}%</div>
-            </button>
-            <button
-              class="rounded-xl border-2 border-gray-200 py-1.5 xl:py-2 text-center transition active:scale-95 hover:border-brand-300 min-w-0"
-              @click="openPriceModal"
-            >
-              <div class="ico-lg mx-auto">改</div>
-              <div class="text-[10px] xl:text-xs font-bold mt-0.5">改價</div>
-            </button>
-          </div>
-
-          <!-- 現金找零 -->
-          <div v-if="pos.paymentMethod === 'cash'" class="mt-2.5 xl:mt-3 space-y-2">
-            <div class="flex flex-wrap gap-1.5 xl:gap-2">
-              <input
-                :value="pos.received || ''"
-                type="number"
-                min="0"
-                class="input !min-w-0 flex-1 basis-24"
-                placeholder="收現金額"
-                @input="pos.setReceived(Number($event.target.value) || 0)"
-                @keyup.enter="checkout"
-              />
-              <button
-                v-for="v in [100, 500, 1000]"
-                :key="v"
-                class="btn-ghost btn-sm shrink-0"
-                @click="pos.setReceived(Number(pos.received || 0) + v)"
-              >
-                +{{ v }}
-              </button>
-              <button class="btn-ghost btn-sm shrink-0" @click="pos.setReceived(pos.total)">剛好</button>
-            </div>
-            <div class="flex justify-between text-sm" :class="cashShort ? 'text-red-500' : 'text-gray-500'">
-              <span>找零</span>
-              <span class="font-extrabold text-lg">{{ fmtMoney(pos.change, catalog.currency) }}</span>
-            </div>
-          </div>
+        <button class="flex justify-between w-full gap-2 text-gray-500 hover:text-brand-500" @click="openDiscount">
+          <span class="truncate">折扣{{ pos.discountLabel ? `（${pos.discountLabel}）` : '' }}</span>
+          <span class="tabular-nums shrink-0" :class="pos.discount > 0 ? 'text-red-500 font-bold' : ''">−{{ fmtMoney(pos.discount, catalog.currency) }}</span>
+        </button>
+        <div v-if="catalog.serviceRate > 0" class="flex justify-between gap-2 text-gray-500">
+          <span>服務費（{{ catalog.serviceRate }}%）</span>
+          <span class="tabular-nums">{{ fmtMoney(pos.serviceFee, catalog.currency) }}</span>
+        </div>
+        <div class="flex justify-between items-baseline gap-2 pt-0.5">
+          <span class="font-extrabold text-sm">應收</span>
+          <span class="text-lg xl:text-xl font-extrabold text-brand-600 tabular-nums">{{ fmtMoney(pos.total, catalog.currency) }}</span>
         </div>
       </div>
 
       <!-- 下單（送廚房） / 結賬 -->
-      <div class="p-3 xl:p-4 border-t border-gray-100 shrink-0 space-y-2">
+      <div class="px-2.5 xl:px-3 py-2 border-t border-gray-100 shrink-0 space-y-1.5">
         <button
           v-if="pos.pendingCount"
-          class="btn-ghost w-full py-2.5 xl:py-3 text-sm xl:text-base !border-brand-300 !text-brand-600"
+          class="btn-ghost w-full !py-2 text-sm !border-brand-300 !text-brand-600"
           :disabled="submitting"
           @click="submitOrder"
         >
           {{ submitting ? '送廚中…' : `🥘 下單 · ${pos.pendingCount} 項待送` }}
         </button>
-        <button class="btn-primary w-full py-3 xl:py-3.5 text-base xl:text-lg" :disabled="!pos.items.length || !!pos.pendingCount" @click="checkout">
+        <button class="btn-primary w-full !py-2.5 text-base" :disabled="!pos.items.length || !!pos.pendingCount" @click="requestCheckout">
           💰 結賬 {{ fmtMoney(pos.total, catalog.currency) }}
         </button>
-        <p v-if="pos.pendingCount" class="text-center text-xs text-gray-400">
+        <p v-if="pos.pendingCount" class="text-center text-[10px] text-gray-400 leading-tight">
           請先「下單」送廚房，顧客用餐後再結賬
         </p>
       </div>
@@ -909,9 +1235,9 @@ const cashShort = computed(() => pos.paymentMethod === 'cash' && pos.received > 
       </template>
     </Modal>
 
-    <!-- ============ 改價（選中列單價） ============ -->
+    <!-- ============ 改價（數字鍵盤） ============ -->
     <Modal v-model="priceModal" title="改價" width="max-w-sm">
-      <div class="space-y-4">
+      <div class="space-y-3">
         <div class="bg-gray-50 rounded-xl px-4 py-3 space-y-1.5 text-sm">
           <div class="flex justify-between gap-3">
             <span class="text-gray-500 shrink-0">品項</span>
@@ -926,20 +1252,27 @@ const cashShort = computed(() => pos.paymentMethod === 'cash' && pos.received > 
             <span class="font-bold">× {{ pos.selectedItem?.qty || 0 }}</span>
           </div>
         </div>
-        <div>
-          <div class="label">新單價（{{ catalog.currency }}）</div>
-          <input
-            ref="priceInputRef"
-            v-model.number="priceForm.price"
-            type="number"
-            min="0"
-            step="any"
-            inputmode="decimal"
-            class="input text-lg font-extrabold"
-            placeholder="輸入新單價"
-            @keyup.enter="applyPrice"
-          />
+
+        <div class="rounded-xl bg-white border-2 border-brand-200 px-3 py-2 flex items-center justify-between gap-2">
+          <span class="text-xs text-gray-400 shrink-0">新單價</span>
+          <span class="font-extrabold text-2xl text-brand-700 tabular-nums truncate">
+            {{ fmtMoney(Number(priceForm.price) || 0, catalog.currency) }}
+          </span>
         </div>
+
+        <div class="grid grid-cols-3 gap-2">
+          <button
+            v-for="key in NUM_PAD_KEYS"
+            :key="key"
+            type="button"
+            class="h-12 rounded-xl border-2 border-gray-200 font-extrabold text-lg transition active:scale-95 hover:border-brand-300 hover:bg-brand-50"
+            :class="key === 'C' || key === '⌫' ? 'text-gray-500' : 'text-gray-800'"
+            @click="onPriceNumPad(key)"
+          >
+            {{ key }}
+          </button>
+        </div>
+
         <div class="text-sm text-gray-500 flex justify-between">
           <span>改價後小計</span>
           <span class="font-extrabold text-brand-600">
@@ -950,6 +1283,67 @@ const cashShort = computed(() => pos.paymentMethod === 'cash' && pos.received > 
       <template #footer>
         <button class="btn-ghost" @click="priceModal = false">取消</button>
         <button class="btn-primary" @click="applyPrice">確認改價</button>
+      </template>
+    </Modal>
+
+    <!-- ============ 現金收現（數字鍵盤） ============ -->
+    <Modal v-model="cashPayModal" title="現金收現" width="max-w-sm">
+      <div class="space-y-3">
+        <div class="bg-gray-50 rounded-xl px-4 py-3 space-y-1.5 text-sm">
+          <div class="flex justify-between">
+            <span class="text-gray-500">應收總額</span>
+            <span class="font-extrabold text-brand-600 text-lg tabular-nums">{{ fmtMoney(pos.total, catalog.currency) }}</span>
+          </div>
+          <div class="flex justify-between" :class="cashShort ? 'text-red-500' : 'text-gray-500'">
+            <span>找零</span>
+            <span class="font-extrabold text-lg tabular-nums">{{ fmtMoney(pos.change, catalog.currency) }}</span>
+          </div>
+        </div>
+
+        <div class="rounded-xl bg-white border-2 border-brand-200 px-3 py-2 flex items-center justify-between gap-2">
+          <span class="text-xs text-gray-400 shrink-0">收現</span>
+          <span class="font-extrabold text-2xl text-gray-900 tabular-nums truncate">
+            {{ receivedDigits ? fmtMoney(Number(receivedDigits), catalog.currency) : fmtMoney(0, catalog.currency) }}
+          </span>
+        </div>
+
+        <div class="grid grid-cols-3 gap-2">
+          <button
+            v-for="key in NUM_PAD_KEYS"
+            :key="key"
+            type="button"
+            class="h-12 rounded-xl border-2 border-gray-200 font-extrabold text-lg transition active:scale-95 hover:border-brand-300 hover:bg-brand-50"
+            :class="key === 'C' || key === '⌫' ? 'text-gray-500' : 'text-gray-800'"
+            @click="onCashNumPad(key)"
+          >
+            {{ key }}
+          </button>
+        </div>
+
+        <div class="grid grid-cols-4 gap-2">
+          <button
+            v-for="v in [100, 500, 1000]"
+            :key="v"
+            type="button"
+            class="h-10 rounded-xl border-2 border-gray-200 text-sm font-bold text-gray-600 hover:border-brand-300 hover:bg-brand-50 active:scale-95"
+            @click="addQuickAmount(v)"
+          >
+            +{{ v }}
+          </button>
+          <button
+            type="button"
+            class="h-10 rounded-xl border-2 border-gray-200 text-sm font-bold text-gray-600 hover:border-brand-300 hover:bg-brand-50 active:scale-95"
+            @click="setExactAmount"
+          >
+            剛好
+          </button>
+        </div>
+      </div>
+      <template #footer>
+        <button class="btn-ghost" @click="cashPayModal = false">取消</button>
+        <button class="btn-primary" :disabled="Number(pos.received) < pos.total" @click="confirmCashPay">
+          確認收款 {{ fmtMoney(pos.received || 0, catalog.currency) }}
+        </button>
       </template>
     </Modal>
 

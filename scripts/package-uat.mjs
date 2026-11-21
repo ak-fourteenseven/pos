@@ -1,15 +1,14 @@
 /**
  * 一鍵打包 UAT 發佈包（pos-uat）：
- *  1. 構建兩個前端（client → public/client、admin → public/admin，admin 部署前綴 /admin/）
+ *  1. 構建前端 SPA（client → public/client，含收銀台 + 後台）
  *  2. esbuild 將服務端（含 express/cors 依賴）打包為單檔 bundle
  *  3. Node SEA（Single Executable Application）把 bundle 注入 node.exe 生成 pos.exe
  *  4. 組裝 pos-uat/：pos.exe + public + 啟動腳本 + 說明文件
  *
  * 產出結構：
  *  pos-uat/
- *  ├── pos.exe          ← 雙擊/啟動即運行（API+前台+後台，內含 node 運行時）
- *  ├── public/client    ← 前台收銀（http://localhost:3001）
- *  ├── public/admin     ← 後台管理（http://localhost:3001/admin）
+ *  ├── pos.exe          ← 雙擊/啟動即運行（API + SPA，內含 node 運行時）
+ *  ├── public/client    ← 前端（http://localhost:3001）
  *  ├── 啟動POS.bat      ← 一鍵啟動並開瀏覽器
  *  ├── README-UAT.txt   ← 使用說明
  *  └── data/            ← 首次運行自動建立（SQLite 資料庫）
@@ -38,11 +37,8 @@ function sh(cmd, opts = {}) {
   execSync(cmd, { stdio: 'inherit', cwd: ROOT, ...opts });
 }
 
-console.log('=== [1/4] 構建前端（client + admin） ===');
+console.log('=== [1/4] 構建前端（client SPA） ===');
 sh('npm --prefix client run build');
-sh('npm --prefix admin run build', {
-  env: { ...process.env, ADMIN_BASE_PATH: '/admin/' },
-});
 
 console.log('=== [2/4] esbuild 打包服務端（含依賴） ===');
 fs.mkdirSync(BUILD, { recursive: true });
@@ -80,18 +76,16 @@ await inject(
 console.log('=== [4/4] 組裝 pos-uat/ ===');
 fs.rmSync(OUT, { recursive: true, force: true });
 fs.mkdirSync(path.join(OUT, 'public/client'), { recursive: true });
-fs.mkdirSync(path.join(OUT, 'public/admin'), { recursive: true });
 fs.cpSync(exeOut, path.join(OUT, 'pos.exe'));
 fs.cpSync(path.join(ROOT, 'client/dist'), path.join(OUT, 'public/client'), { recursive: true });
-fs.cpSync(path.join(ROOT, 'admin/dist'), path.join(OUT, 'public/admin'), { recursive: true });
 
 const BAT = `@echo off
 chcp 65001 >nul
 title POS UAT
 cd /d %~dp0
 echo [POS UAT] 服務啟動中...（關閉此視窗即停止服務）
-echo   前台收銀  http://localhost:3001
-echo   後台管理  http://localhost:3001/admin
+echo   系統入口  http://localhost:3001
+echo   登入後可進入收銀台或後台管理
 start "" /b cmd /c "timeout /t 2 /nobreak >nul && start http://localhost:3001"
 pos.exe
 pause
@@ -103,15 +97,14 @@ const README = `POS UAT 測試包
 
 一、內容物
   pos.exe        主程式（內含 Node 運行時 + 服務端 + 全部依賴，無需另裝 Node）
-  public/client  前台收銀頁面資源
-  public/admin   後台管理頁面資源
+  public/client  前端 SPA（收銀台 + 後台管理）
   啟動POS.bat    一鍵啟動（自動開啟瀏覽器）
   data/          SQLite 資料庫（首次運行自動建立）
 
 二、啟動方式
   雙擊「啟動POS.bat」即可；或直接執行 pos.exe。
-  - 前台收銀： http://localhost:3001
-  - 後台管理： http://localhost:3001/admin （僅店長帳號 admin）
+  - 系統入口： http://localhost:3001
+  - 登入後進入首頁，可選擇收銀台或後台管理（後台僅店長）
   - 預設帳號：admin / cashier / cashier2，密碼皆為 123456
   - 關閉命令列視窗 = 停止服務
 

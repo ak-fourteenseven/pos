@@ -8,9 +8,8 @@
 | --- | --- |
 | 本地資料庫 | SQLite（Node 內建 `node:sqlite`，零原生編譯依賴），資料檔案 `server/data/pos.db` |
 | 服務端 | Node.js + Express REST API（埠號 3001） |
-| 前台收銀 app | Vue 3 + Vite（埠號 **5173**）——只含收銀台與桌台視圖 |
-| 後台管理 app | Vue 3 + Vite（埠號 **5175**）——報表、菜品/桌台/員工/支付/時段設定、系統維護（獨立登入，僅店長） |
-| 共用層 | `shared/`（api 封裝、stores、工具、Modal、登入頁、全域樣式），兩個前端以 `@shared` alias 引用 |
+| 前端 SPA | Vue 3 + Vite（埠號 **5173**）——登入後首頁可進入收銀台或後台管理 |
+| 共用層 | `shared/`（api 封裝、stores、工具、Modal、登入頁、全域樣式），以 `@shared` alias 引用 |
 | 圖表 / 匯出 | 自繪 SVG 圖表 + SheetJS（Excel）/ CSV 匯出 |
 
 > 文檔建議的 Tauri/Electron 桌面殼可在本專案基礎上直接套用（前端已支援 `vite build` 後由服務端託管 `dist`）。
@@ -21,17 +20,18 @@
 # 1. 安裝依賴（首次）
 npm run setup
 
-# 2. 啟動服務端 + 前台收銀 + 後台管理（開發模式）
+# 2. 啟動服務端 + 前端 SPA（開發模式）
 npm run dev
 # 服務端 API  http://localhost:3001
-# 前台收銀    http://localhost:5173
-# 後台管理    http://localhost:5175
+# 前端 SPA    http://localhost:5173
 ```
 
-| 應用 | 網址 | 說明 |
+登入後進入**首頁儀表板**：
+
+| 入口 | 路徑 | 說明 |
 | --- | --- | --- |
-| 前台收銀 | <http://localhost:5173> | 收銀台 + 桌台視圖；店長／收銀員皆可登入 |
-| 後台管理 | <http://localhost:5175> | 報表與所有設定；**僅店長帳號可登入** |
+| 收銀台 | `/pos`、`/tables` | 點餐、結帳、桌台；店長／收銀員皆可 |
+| 後台管理 | `/admin/*` | 報表與所有設定；**僅店長**可見並可進入 |
 
 測試帳號（初始密碼皆為 `123456`）：`admin`（店長）、`cashier` / `cashier2`（收銀員）。
 
@@ -51,7 +51,7 @@ npm run dev
 
 ## 功能模組
 
-- **前台收銀**（`client/`）：分類切換 / 菜品網格（售罄標記）、購物車（數量、備註、規格、送廚狀態）、折扣/抹零/服務費、多種支付方式（現金找零計算機）、開台/換桌/併桌、桌台狀態視覺化（空閒/點餐中/製作中/待清/預訂）、退菜、作廢訂單、今日訂單查詢、廚房單與結帳小票預覽。
+- **收銀台**（`client/` SPA）：分類切換 / 菜品網格（售罄標記）、購物車（數量、備註、規格、送廚狀態）、折扣/抹零/服務費、多種支付方式（現金找零計算機）、開台/換桌/併桌、桌台狀態視覺化（空閒/點餐中/製作中/待清/預訂）、退菜、作廢訂單、今日訂單查詢、廚房單與結帳小票預覽。
 - **套餐向導點餐**（粉麵餐店模式，見 [docs/點餐流程設計.md](docs/點餐流程設計.md)）：
   - 湯底套餐 5 步向導：湯底 → 麵類（烏冬 +$2）→ 辣度（清湯自動跳過）→ 配料多選（$7/$8/$9/$11 階梯）→ 飲品
   - 湯餃套餐 3 步向導：類型 → 餡料 → 飲品
@@ -59,7 +59,7 @@ npm run dev
   - **可隨時取消退出**：取消按鈕 / 右上角 ✕ / ESC / 點背景四種方式皆可離開，取消不會把商品加入購物車
   - **飲品時段計價引擎**：下午茶全免、午/晚市熱飲免費、凍飲 +$3（時段可在後台自訂，價格由後端覆核）
   - 小票雙視圖：顧客收銀單（含時段優惠明細）/ 廚房單（後廚 + 水吧分區）
-- **後台管理**（`admin/`，僅店長登入）：菜品管理（分類/規格/條碼/emoji/顏色/上下架）、桌台管理（區域/容納人數/狀態）、支付方式設定（啟用停用/手續費率）、員工與權限（收銀員/店長、重設密碼）、門店資訊設定、時段設定（飲品計價規則）。
+- **後台管理**（同一 SPA 的 `/admin/*`，僅店長）：菜品管理（分類/規格/條碼/emoji/顏色/上下架）、桌台管理（區域/容納人數/狀態）、支付方式設定（啟用停用/手續費率）、員工與權限（收銀員/店長、重設密碼）、門店資訊設定、時段設定（飲品計價規則）。
 - **報表統計**：日結單、月報表（每日趨勢）、菜品銷量排行 + ABC 分析、支付方式佔比、時段分佈、交接班報表，支援匯出 CSV / Excel。
 - **系統維護**：一鍵備份（自訂資料夾或伺服器預備份目錄）、下載資料庫、還原備份、資料庫資訊。
 
@@ -75,8 +75,7 @@ npm run build:uat
 ```
 pos-uat/
 ├── pos.exe        # 單一執行檔：內含 Node 運行時 + 服務端 + 全部依賴
-├── public/client  # 前台收銀頁面（http://localhost:3001）
-├── public/admin   # 後台管理頁面（http://localhost:3001/admin，以 /admin/ 前綴構建）
+├── public/client  # 前端 SPA（http://localhost:3001）
 ├── 啟動POS.bat    # 一鍵啟動並自動開瀏覽器
 ├── README-UAT.txt # 部署說明
 └── data/          # SQLite 資料庫（首次運行自動建立，隨資料夾整包遷移）
@@ -84,56 +83,50 @@ pos-uat/
 
 *   打包流程（`scripts/package-uat.mjs`）：前端構建 → **esbuild** 把服務端與依賴打包為單檔 bundle → **Node SEA** 把 bundle 注入 `node.exe` 生成 `pos.exe`（SEA fuse 哨兵從二進位自動偵測，相容 Node 20/22/24）。
 *   運行時無需安裝 Node；資料庫落在 exe 同層 `data/`（可用 `POS_DATA_DIR` 覆蓋），換埠在 bat 內加 `set PORT=8080`。
-*   服務端同時支援開發模式靜態託管（`client/dist` 根路徑 + `admin/dist` 於 `/admin`）與打包模式（exe 同層 `public/`）。
+*   服務端支援開發模式靜態託管（`client/dist`）與打包模式（exe 同層 `public/client`）。
 
 ## 目錄結構
 
 ```
 POS-dev/
-├── package.json          # 一鍵啟動/安裝腳本（server + client + admin）
+├── package.json          # 一鍵啟動/安裝腳本（server + client）
 ├── docs/                 # 點餐流程與業務邏輯設計文檔
 ├── server/               # 本地服務端（REST API + 送廚/結賬狀態機）
 │   ├── src/db.js         #   SQLite schema + 種子資料（含套餐選項組/時段）
 │   ├── src/index.js      #   REST API + 飲品時段計價引擎
 │   └── data/pos.db       #   本地資料庫（運行後生成）
-├── shared/               # 前後台共用層（@shared alias）
+├── shared/               # 共用層（@shared alias）
 │   ├── api.js            #   API 封裝（自動帶登入身份頭部）
 │   ├── stores/           #   auth / catalog / shift / toast
 │   ├── utils/            #   格式化、飲品時段計價
 │   ├── components/       #   Modal
-│   ├── views/            #   登入頁（前台/後台參數化复用）
+│   ├── views/            #   登入頁
 │   └── style.css         #   Tailwind 全域樣式（含列印廚房單樣式）
-├── client/               # 前台收銀 app（5173）：收銀台 + 桌台視圖
+├── client/               # 前端 SPA（5173）：首頁 + 收銀台 + 後台
 │   └── src/
-│       ├── views/        #   收銀台、桌台視圖
-│       ├── components/   #   套餐嚮導、飲品彈窗、廚房單
+│       ├── views/        #   首頁、收銀台、桌台、後台各頁
+│       ├── components/   #   套餐嚮導、飲品彈窗、廚房單、圖表
 │       ├── stores/       #   Pinia：pos（購物車 / 送廚 / 結賬）
-│       └── layouts/      #   前台框架（交接班頂欄）
-├── admin/                # 後台管理 app（5175）：報表 + 各設定
-│   └── src/
-│       ├── views/        #   報表、菜品、桌台、支付、員工、系統設定
-│       ├── components/   #   SVG 圖表
-│       ├── utils/        #   CSV / Excel 匯出
-│       └── layouts/      #   後台框架
+│       └── layouts/      #   PosLayout / AdminLayout
 └── tests/e2e/            # Playwright 端對端測試
 ```
 
 ## 端對端測試
 
-需要服務端（3001）、前台收銀（5173）與後台管理（5175）同時啟動，另需 Chromium（`playwright-core` 不會自動下載瀏覽器）：
+需要服務端（3001）與前端 SPA（5173）同時啟動，另需 Chromium（`playwright-core` 不會自動下載瀏覽器）：
 
 ```bash
 npm i -D playwright-core
 npx playwright install chromium   # 或設定環境變數 PW_CHROME_PATH 指定瀏覽器路徑
 npm run test:e2e
-# 若埠號不同，可用 POS_E2E_BASE / POS_E2E_ADMIN / POS_E2E_API 指定
+# 若埠號不同，可用 POS_E2E_BASE / POS_E2E_API 指定
 ```
 
 | 腳本 | 覆蓋範圍 |
 | --- | --- |
 | `tests/e2e/wizard-close.test.js` | 套餐嚮導四種關閉方式（取消 / ✕ / ESC / 點背景）、關閉後購物車不誤加、可重新開啟並完成下單 |
 | `tests/e2e/submit-flow.test.js` | 送廚 → 結賬主流程、廚房單內容、加菜追加、桌台狀態流轉、送廚後退菜權限、未送廚不可結賬 |
-| `tests/e2e/admin.test.js` | 前後台分離（前台無後台路由/選單）、後台登入權限（收銀員不可登入）、後台各頁面、時段設定 |
+| `tests/e2e/admin.test.js` | 首頁儀表板、收銀台導航隔離、後台權限（收銀員不可進）、後台各頁面、時段設定 |
 
 ## 注意事項
 

@@ -17,11 +17,12 @@ onMounted(async () => {
 });
 
 const METHOD_ICONS = {
-  cash: '💵',
-  alipay: '<span class="inline-flex items-center justify-center w-8 h-8 rounded-lg text-white text-sm font-bold" style="background:#1677FF">支</span>',
-  octopus: '🟠',
-  card: '💳',
-  credit: '📒',
+  cash: { emoji: '💵' },
+  alipay: { html: '<span class="inline-flex items-center justify-center w-8 h-8 rounded-lg text-white text-sm font-bold" style="background:#1677FF">支</span>' },
+  octopus: { img: '/payment-icons/octopus.png?v=2' },
+  fps: { img: '/payment-icons/fps.png?v=2' },
+  card: { img: '/payment-icons/fps.png?v=2' },
+  credit: { emoji: '📒' },
 };
 
 async function save(pm) {
@@ -49,13 +50,23 @@ async function toggle(pm) {
 <template>
   <div class="h-full overflow-y-auto p-5">
     <p class="text-sm text-gray-500 mb-4">
-      啟用或停用支付方式；停用後收銀台不再顯示。手續費率僅供統計參考（如信用卡 2.5%）。
+      啟用或停用支付方式；停用後收銀台不再顯示。手續費率僅供統計參考。
     </p>
 
     <div class="grid sm:grid-cols-2 gap-4">
       <div v-for="pm in catalog.payments" :key="pm.id" class="card p-5">
         <div class="flex items-center gap-3">
-          <span class="text-3xl flex items-center" v-html="METHOD_ICONS[pm.code] || '💰'" />
+          <img
+            v-if="METHOD_ICONS[pm.code]?.img"
+            :src="METHOD_ICONS[pm.code].img"
+            :alt="pm.name"
+            class="w-8 h-8 object-contain"
+          />
+          <span
+            v-else
+            class="text-3xl flex items-center"
+            v-html="METHOD_ICONS[pm.code]?.html || METHOD_ICONS[pm.code]?.emoji || '💰'"
+          />
           <div class="flex-1">
             <input v-model="pm.name" class="input !border-transparent !px-0 font-extrabold !text-lg hover:!border-gray-200 focus:!border-brand-400 focus:!px-3" />
             <div class="text-xs text-gray-400 mt-0.5">代碼：{{ pm.code }}</div>

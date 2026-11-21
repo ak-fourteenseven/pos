@@ -54,8 +54,10 @@ export const TABLE_STATUS = {
 export const PAYMENT_META = {
   cash: { label: '現金', icon: '💵' },
   alipay: { label: '支付寶', icon: '<span class="inline-flex items-center justify-center w-6 h-6 rounded-md text-white text-xs font-bold" style="background:#1677FF">支</span>' },
-  octopus: { label: '八達通', icon: '🟠' },
-  card: { label: '信用卡', icon: '💳' },
+  octopus: { label: '八達通', icon: '/payment-icons/octopus.png?v=2', img: true },
+  fps: { label: '轉數快', icon: '/payment-icons/fps.png?v=2', img: true },
+  /** @deprecated 舊資料相容：信用卡已改為轉數快 */
+  card: { label: '轉數快', icon: '/payment-icons/fps.png?v=2', img: true },
   credit: { label: '記帳', icon: '📒' },
 };
 

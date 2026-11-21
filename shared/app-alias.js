@@ -4,9 +4,9 @@ import path from 'node:path';
 /**
  * `shared/` 位於各應用根目錄之外，Vite/Rollup 解析 shared 內的裸模組引用
  * （vue / pinia / vue-router）時會從 shared/ 開始往上找 node_modules 而失敗，
- * 因此統一指向「使用方應用」自己的 node_modules（兩個應用版本一致，避免多實例）。
+ * 因此統一指向「使用方應用」自己的 node_modules（避免多實例）。
  *
- * @param {string} appDir 應用根目錄（client/ 或 admin/）
+ * @param {string} appDir 應用根目錄（client/）
  * @returns {Record<string, string>} resolve.alias 用的映射
  */
 export function appDepAliases(appDir) {

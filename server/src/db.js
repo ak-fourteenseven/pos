@@ -229,7 +229,7 @@ function seed() {
   insertPay.run('cash', '現金', 1, 0, 1);
   insertPay.run('alipay', '支付寶', 1, 0, 2);
   insertPay.run('octopus', '八達通', 1, 0, 3);
-  insertPay.run('card', '信用卡', 1, 0.025, 4);
+  insertPay.run('fps', '轉數快', 1, 0, 4);
   insertPay.run('credit', '記帳', 1, 0, 5);
 
   const insertCat = d.prepare('INSERT INTO categories (name, sort_order) VALUES (?, ?)');
@@ -290,6 +290,17 @@ function migrate() {
   add('order_items', 'sent_at', 'sent_at DATETIME');
   add('orders', 'ordered_at', 'ordered_at DATETIME');
   add('orders', 'submit_count', 'submit_count INTEGER DEFAULT 0');
+  // 信用卡 → 轉數快（FPS）；並校正已存在的 fps 名稱／手續費
+  const cardPm = d.prepare("SELECT id FROM payment_methods WHERE code = 'card'").get();
+  if (cardPm) {
+    const fpsExists = d.prepare("SELECT id FROM payment_methods WHERE code = 'fps'").get();
+    if (fpsExists) {
+      d.prepare('DELETE FROM payment_methods WHERE id = ?').run(cardPm.id);
+    } else {
+      d.prepare("UPDATE payment_methods SET code = 'fps', name = '轉數快', fee_rate = 0 WHERE id = ?").run(cardPm.id);
+    }
+  }
+  d.prepare("UPDATE payment_methods SET name = '轉數快', fee_rate = 0 WHERE code = 'fps'").run();
 }
 
 /* ---------------- 種子：粉麵餐店菜單（套餐向導 + 飲品時段計價） ---------------- */

@@ -266,18 +266,22 @@ export const usePosStore = defineStore('pos', {
           items: this.items.map((i) => this.itemPayload(i)),
         });
         orderId = created.id;
+        this.orderId = orderId;
+        this.orderNo = created.order_no || '';
         if (created.items && created.items.length) {
           this.items = created.items.map((it) => this.mapItem(it));
-          this.orderId = orderId;
           this.syncSelection();
         }
       }
       const res = await api.post(`/orders/${orderId}/submit`);
       // 以服務端狀態刷新購物車（明細帶上 sent_at）
       const full = await api.get(`/orders/${orderId}`);
-      if (full && full.items) {
-        this.items = full.items.map((it) => this.mapItem(it));
-        this.syncSelection();
+      if (full) {
+        if (full.order_no) this.orderNo = full.order_no;
+        if (full.items) {
+          this.items = full.items.map((it) => this.mapItem(it));
+          this.syncSelection();
+        }
       }
       return res;
     },

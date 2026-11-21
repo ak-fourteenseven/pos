@@ -4,10 +4,10 @@ import { api } from '@shared/api';
 import { useCatalogStore } from '@shared/stores/catalog';
 import { useShiftStore } from '@shared/stores/shift';
 import { useToastStore } from '@shared/stores/toast';
-import BarChart from '../components/charts/BarChart.vue';
-import LineChart from '../components/charts/LineChart.vue';
-import DonutChart from '../components/charts/DonutChart.vue';
-import { downloadCSV, downloadExcel } from '../utils/export';
+import BarChart from '../../components/charts/BarChart.vue';
+import LineChart from '../../components/charts/LineChart.vue';
+import DonutChart from '../../components/charts/DonutChart.vue';
+import { downloadCSV, downloadExcel } from '../../utils/export';
 import { fmtDateTime, fmtMoney, fmtNum, fmtPct, thisMonth, today, PAYMENT_META } from '@shared/utils/format';
 
 const catalog = useCatalogStore();
@@ -29,7 +29,7 @@ async function loadDaily() {
   }
 }
 
-const PAYMENT_COLORS = { cash: '#f59e0b', alipay: '#10b981', octopus: '#f97316', card: '#3b82f6', credit: '#8b5cf6' };
+const PAYMENT_COLORS = { cash: '#f59e0b', alipay: '#10b981', octopus: '#f97316', fps: '#2563eb', card: '#2563eb', credit: '#8b5cf6' };
 const payName = (code) => PAYMENT_META[code]?.label || code;
 
 const paymentDonut = computed(() =>

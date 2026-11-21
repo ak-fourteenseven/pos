@@ -190,6 +190,16 @@ const pageTitle = computed(() => route.meta.title || '');
         </button>
       </nav>
 
+      <div class="px-2 xl:px-5 py-3 border-t border-gray-800">
+        <router-link
+          to="/"
+          title="返回首頁"
+          class="flex items-center justify-center xl:justify-start gap-2 text-sm font-bold text-gray-400 hover:text-white transition"
+        >
+          <span class="hidden xl:inline">← 返回首頁</span>
+          <span class="xl:hidden ico">🏠</span>
+        </router-link>
+      </div>
     </aside>
 
     <!-- 主區 -->
