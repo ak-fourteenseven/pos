@@ -128,7 +128,7 @@ async function saveSlots() {
 
 const TABLE_LABELS = {
   products: '菜品', orders: '訂單', order_items: '訂單明細',
-  tables: '桌台', staff: '員工', shift_records: '交接班紀錄',
+  tables: '桌台', staff: '員工', business_days: '營業日紀錄',
 };
 </script>
 

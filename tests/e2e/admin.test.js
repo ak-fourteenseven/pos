@@ -53,6 +53,12 @@ async function api(p, method = 'GET', body, role = 'manager', uid = 1) {
   check('A2 首頁顯示收銀台與後台入口', dash.includes('收銀台') && dash.includes('後台管理'));
 
   await page.click('button:has-text("收銀台")');
+  await page.waitForTimeout(800);
+  const openBtn = page.locator('button:has-text("確認開市")');
+  if (await openBtn.count()) {
+    check('A2b 開市彈窗出現', (await bodyText()).includes('開市'));
+    await openBtn.click();
+  }
   await page.waitForURL('**/pos', { timeout: 8000 }).catch(() => {});
   await page.waitForTimeout(1500);
   const frontNav = await navText();
@@ -124,6 +130,9 @@ async function api(p, method = 'GET', body, role = 'manager', uid = 1) {
   await page.goto(`${BASE}/`, { waitUntil: 'networkidle' });
   await page.waitForTimeout(800);
   await page.click('button:has-text("收銀台")');
+  await page.waitForTimeout(800);
+  const openBtn2 = page.locator('button:has-text("確認開市")');
+  if (await openBtn2.count()) await openBtn2.click();
   await page.waitForURL('**/pos', { timeout: 8000 }).catch(() => {});
   await page.waitForTimeout(1500);
   check('C7 收銀台可正常進入', (await bodyText()).includes('購物車'));

@@ -32,6 +32,13 @@ function getSettings(db) {
   const rows = db.prepare('SELECT key, value FROM settings').all();
   return Object.fromEntries(rows.map((r) => [r.key, r.value]));
 }
+/** 外賣桌區 → 固定支付方式（結賬時覆寫） */
+function paymentForTableArea(area) {
+  const a = String(area || '').toLowerCase();
+  if (a.includes('keepta') || a.includes('keeta')) return 'keepta';
+  if (a.includes('foodpanda')) return 'foodpanda';
+  return null;
+}
 function genOrderNo(db) {
   const d = new Date();
   const ymd = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
@@ -472,7 +479,7 @@ app.post('/api/tables/merge', (req, res) => {
 /* ================= 訂單 ================= */
 app.get('/api/orders', (req, res) => {
   const db = getDb();
-  const { status, date, table_id, limit = 200 } = req.query;
+  const { status, date, business_date, table_id, limit = 200 } = req.query;
   let sql = `SELECT o.*, t.table_number, s.name AS cashier_name,
       (SELECT COALESCE(SUM(oi.quantity), 0) FROM order_items oi WHERE oi.order_id = o.id) AS item_count
     FROM orders o
@@ -481,7 +488,8 @@ app.get('/api/orders', (req, res) => {
     WHERE 1 = 1`;
   const args = [];
   if (status) { sql += ' AND o.status = ?'; args.push(status); }
-  if (date) { sql += ' AND date(o.created_at) = ?'; args.push(date); }
+  if (business_date) { sql += ' AND o.business_date = ?'; args.push(business_date); }
+  else if (date) { sql += ' AND date(o.created_at) = ?'; args.push(date); }
   if (table_id) { sql += ' AND o.table_id = ?'; args.push(table_id); }
   sql += ' ORDER BY o.id DESC LIMIT ?';
   args.push(Number(limit));
@@ -616,13 +624,13 @@ app.get('/api/orders/:id/ticket', (req, res) => {
   if (!sent.length) return fail(res, '該訂單尚未下單送廚');
   ok(res, buildKitchenTicket(order, sent));
 });
-/** 換桌 / 備註 */
+/** 換桌 / 備註 / 人數 */
 app.patch('/api/orders/:id', (req, res) => {
   const db = getDb();
   const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
   if (!order) return fail(res, '訂單不存在', 404);
-  if (order.status !== 'open' && order.status !== 'ordered') return fail(res, '僅進行中的訂單可換桌');
-  const { table_id, remark } = req.body || {};
+  if (order.status !== 'open' && order.status !== 'ordered') return fail(res, '僅進行中的訂單可修改');
+  const { table_id, remark, guest_count } = req.body || {};
   if (table_id != null && Number(table_id) !== order.table_id) {
     const t = db.prepare('SELECT * FROM tables WHERE id = ?').get(table_id);
     if (!t) return fail(res, '目標桌台不存在', 404);
@@ -632,6 +640,10 @@ app.patch('/api/orders/:id', (req, res) => {
     db.prepare("UPDATE tables SET status = 'occupied', current_order_id = ? WHERE id = ?").run(order.id, t.id);
   }
   if (remark !== undefined) db.prepare('UPDATE orders SET remark = ? WHERE id = ?').run(remark, order.id);
+  if (guest_count !== undefined) {
+    const n = Math.max(0, Math.min(999, Math.floor(Number(guest_count) || 0)));
+    db.prepare('UPDATE orders SET guest_count = ? WHERE id = ?').run(n, order.id);
+  }
   ok(res, orderWithItems(db, order.id));
 });
 /** 結帳 */
@@ -641,7 +653,12 @@ app.post('/api/orders/:id/pay', (req, res) => {
   if (!order) return fail(res, '訂單不存在', 404);
   if (order.status === 'completed') return fail(res, '訂單已結帳');
   if (order.status === 'voided') return fail(res, '訂單已作廢');
-  const { payment_method, discount_amount = 0, received_amount = 0 } = req.body || {};
+  let { payment_method, discount_amount = 0, received_amount = 0 } = req.body || {};
+  if (order.table_id) {
+    const t = db.prepare('SELECT area FROM tables WHERE id = ?').get(order.table_id);
+    const platformPay = paymentForTableArea(t?.area);
+    if (platformPay) payment_method = platformPay;
+  }
   if (!payment_method) return fail(res, '請選擇支付方式');
   const items = db.prepare('SELECT * FROM order_items WHERE order_id = ?').all(order.id);
   if (!items.length) return fail(res, '訂單無明細，無法結帳');
@@ -657,11 +674,14 @@ app.post('/api/orders/:id/pay', (req, res) => {
   const received = isCash ? Number(received_amount || 0) : total;
   if (isCash && received < total) return fail(res, '收現金額不足');
   const change = isCash ? received - total : 0;
-  const shift = db.prepare(`SELECT * FROM shift_records WHERE cashier_id = ? AND status = 'open'
-    ORDER BY id DESC LIMIT 1`).get(order.cashier_id);
+  const day = db.prepare(`SELECT * FROM business_days WHERE cashier_id = ? AND status = 'open'
+    ORDER BY id DESC LIMIT 1`).get(req.user.id);
+  if (!day) return fail(res, '尚未開市，請先開啟營業日');
   db.prepare(`UPDATE orders SET status = 'completed', total_amount = ?, discount_amount = ?, service_fee = ?,
-    pay_amount = ?, received_amount = ?, change_amount = ?, payment_method = ?, shift_id = ? WHERE id = ?`)
-    .run(subtotal, discount, serviceFee, total, received, change, payment_method, shift ? shift.id : null, order.id);
+    pay_amount = ?, received_amount = ?, change_amount = ?, payment_method = ?,
+    business_day_id = ?, business_date = ?, cashier_id = COALESCE(cashier_id, ?) WHERE id = ?`)
+    .run(subtotal, discount, serviceFee, total, received, change, payment_method,
+      day.id, day.business_date, req.user.id, order.id);
   if (order.table_id) freeTable(db, order.table_id, 'cleaning');
   ok(res, orderWithItems(db, order.id));
 });
@@ -728,39 +748,108 @@ app.put('/api/settings', managerOnly, (req, res) => {
   ok(res, getSettings(db));
 });
 
-/* ================= 交接班 ================= */
-app.get('/api/shifts', (req, res) => {
-  const db = getDb();
-  ok(res, db.prepare(`SELECT s.*, st.name AS cashier_name FROM shift_records s
-    LEFT JOIN staff st ON st.id = s.cashier_id ORDER BY s.id DESC LIMIT 60`).all());
-});
-app.get('/api/shifts/current', (req, res) => {
-  const db = getDb();
-  ok(res, db.prepare(`SELECT * FROM shift_records WHERE cashier_id = ? AND status = 'open'
-    ORDER BY id DESC LIMIT 1`).get(req.user.id) || null);
-});
-app.post('/api/shifts/open', (req, res) => {
-  const db = getDb();
-  const open = db.prepare(`SELECT * FROM shift_records WHERE cashier_id = ? AND status = 'open'`).get(req.user.id);
-  if (open) return fail(res, '已有進行中的交接班，請先結班');
-  const r = db.prepare(`INSERT INTO shift_records (start_time, cashier_id, status)
-    VALUES (datetime('now','localtime'), ?, 'open')`).run(req.user.id);
-  ok(res, db.prepare('SELECT * FROM shift_records WHERE id = ?').get(Number(r.lastInsertRowid)));
-});
-app.post('/api/shifts/:id/close', (req, res) => {
-  const db = getDb();
-  const shift = db.prepare('SELECT * FROM shift_records WHERE id = ?').get(req.params.id);
-  if (!shift) return fail(res, '交接班記錄不存在', 404);
-  if (shift.status === 'closed') return fail(res, '該班別已結班');
+/* ================= 營業日（開市 / 日結） ================= */
+function todayYmd() {
+  return new Date().toLocaleDateString('sv-SE');
+}
+function businessDaySummary(db, day) {
   const stats = db.prepare(`SELECT
       COALESCE(SUM(pay_amount), 0) AS total_sales,
       COALESCE(SUM(CASE WHEN payment_method = 'cash' THEN pay_amount ELSE 0 END), 0) AS cash_amount,
       COUNT(*) AS order_count
-    FROM orders WHERE cashier_id = ? AND status = 'completed' AND created_at >= ?`).get(shift.cashier_id, shift.start_time);
-  db.prepare(`UPDATE shift_records SET end_time = datetime('now','localtime'), total_sales = ?,
-    cash_amount = ?, order_count = ?, status = 'closed' WHERE id = ?`)
-    .run(stats.total_sales, stats.cash_amount, stats.order_count, shift.id);
-  ok(res, db.prepare('SELECT * FROM shift_records WHERE id = ?').get(shift.id));
+    FROM orders WHERE business_day_id = ? AND status = 'completed'`).get(day.id);
+  const byPayment = db.prepare(`SELECT payment_method, COUNT(*) AS order_count, SUM(pay_amount) AS amount
+    FROM orders WHERE business_day_id = ? AND status = 'completed'
+    GROUP BY payment_method ORDER BY amount DESC`).all(day.id);
+  const opening = Number(day.opening_cash) || 0;
+  const cashSales = Number(stats.cash_amount) || 0;
+  return {
+    ...day,
+    total_sales: stats.total_sales,
+    cash_amount: cashSales,
+    order_count: stats.order_count,
+    by_payment: byPayment,
+    /** 錢箱應有現金 = 開市現金 + 現金收款 */
+    expected_cash: opening + cashSales,
+  };
+}
+app.get('/api/business-days', (req, res) => {
+  const db = getDb();
+  const limit = Math.min(200, Number(req.query.limit) || 60);
+  ok(res, db.prepare(`SELECT b.*, st.name AS cashier_name FROM business_days b
+    LEFT JOIN staff st ON st.id = b.cashier_id ORDER BY b.id DESC LIMIT ?`).all(limit));
+});
+app.get('/api/business-days/current', (req, res) => {
+  const db = getDb();
+  ok(res, db.prepare(`SELECT * FROM business_days WHERE cashier_id = ? AND status = 'open'
+    ORDER BY id DESC LIMIT 1`).get(req.user.id) || null);
+});
+/** 該收銀員最近一筆營業日（含已日結） */
+app.get('/api/business-days/latest', (req, res) => {
+  const db = getDb();
+  if (!req.user.id) return fail(res, '請先登入', 401);
+  ok(res, db.prepare(`SELECT * FROM business_days WHERE cashier_id = ?
+    ORDER BY id DESC LIMIT 1`).get(req.user.id) || null);
+});
+app.post('/api/business-days/open', (req, res) => {
+  const db = getDb();
+  if (!req.user.id) return fail(res, '請先登入', 401);
+  const open = db.prepare(`SELECT * FROM business_days WHERE cashier_id = ? AND status = 'open'`).get(req.user.id);
+  if (open) return fail(res, '已有進行中的營業日，請先日結');
+  let { opening_cash = 0, business_date } = req.body || {};
+  opening_cash = Math.max(0, Number(opening_cash) || 0);
+  business_date = String(business_date || todayYmd()).slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(business_date)) return fail(res, '營業日格式錯誤');
+  const r = db.prepare(`INSERT INTO business_days
+    (business_date, opening_cash, start_time, cashier_id, status)
+    VALUES (?, ?, datetime('now','localtime'), ?, 'open')`)
+    .run(business_date, opening_cash, req.user.id);
+  ok(res, db.prepare('SELECT * FROM business_days WHERE id = ?').get(Number(r.lastInsertRowid)));
+});
+app.get('/api/business-days/:id/summary', (req, res) => {
+  const db = getDb();
+  const day = db.prepare('SELECT * FROM business_days WHERE id = ?').get(req.params.id);
+  if (!day) return fail(res, '營業日不存在', 404);
+  if (day.cashier_id !== req.user.id && req.user.role !== 'manager') {
+    return fail(res, '無權查看此營業日', 403);
+  }
+  ok(res, businessDaySummary(db, day));
+});
+app.post('/api/business-days/:id/close', (req, res) => {
+  const db = getDb();
+  const day = db.prepare('SELECT * FROM business_days WHERE id = ?').get(req.params.id);
+  if (!day) return fail(res, '營業日不存在', 404);
+  if (day.cashier_id !== req.user.id && req.user.role !== 'manager') {
+    return fail(res, '無權日結此營業日', 403);
+  }
+  if (day.status === 'closed') return fail(res, '該營業日已日結');
+  const summary = businessDaySummary(db, day);
+  const counted = Math.max(0, Number((req.body || {}).counted_cash));
+  const countedCash = Number.isFinite(counted) ? counted : null;
+  db.prepare(`UPDATE business_days SET end_time = datetime('now','localtime'), total_sales = ?,
+    cash_amount = ?, order_count = ?, counted_cash = ?, status = 'closed' WHERE id = ?`)
+    .run(summary.total_sales, summary.cash_amount, summary.order_count, countedCash, day.id);
+  ok(res, {
+    ...db.prepare('SELECT * FROM business_days WHERE id = ?').get(day.id),
+    by_payment: summary.by_payment,
+    expected_cash: summary.expected_cash,
+  });
+});
+/** 撤銷日結：重新開啟已日結的營業日 */
+app.post('/api/business-days/:id/reopen', (req, res) => {
+  const db = getDb();
+  if (!req.user.id) return fail(res, '請先登入', 401);
+  const day = db.prepare('SELECT * FROM business_days WHERE id = ?').get(req.params.id);
+  if (!day) return fail(res, '營業日不存在', 404);
+  if (day.cashier_id !== req.user.id && req.user.role !== 'manager') {
+    return fail(res, '無權撤銷此營業日日結', 403);
+  }
+  if (day.status !== 'closed') return fail(res, '該營業日未日結，無需撤銷');
+  const otherOpen = db.prepare(`SELECT id FROM business_days WHERE cashier_id = ? AND status = 'open' AND id != ?`)
+    .get(day.cashier_id, day.id);
+  if (otherOpen) return fail(res, '已有進行中的營業日，請先日結後再撤銷');
+  db.prepare(`UPDATE business_days SET status = 'open', end_time = NULL WHERE id = ?`).run(day.id);
+  ok(res, db.prepare('SELECT * FROM business_days WHERE id = ?').get(day.id));
 });
 
 /* ================= 報表 ================= */
@@ -908,7 +997,7 @@ app.post('/api/system/restore', managerOnly, express.raw({ type: 'application/oc
 app.get('/api/system/info', (req, res) => {
   const db = getDb();
   const counts = {};
-  for (const t of ['products', 'orders', 'order_items', 'tables', 'staff', 'shift_records']) {
+  for (const t of ['products', 'orders', 'order_items', 'tables', 'staff', 'business_days']) {
     counts[t] = db.prepare(`SELECT COUNT(*) AS c FROM ${t}`).get().c;
   }
   ok(res, {

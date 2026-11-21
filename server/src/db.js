@@ -2,6 +2,9 @@
  * 本地 SQLite 資料庫（使用 Node 內建 node:sqlite，無需原生編譯）
  * - 資料庫檔案：server/data/pos.db
  * - 所有時間欄位使用本地時間（datetime('now','localtime')）
+ * - POS_SEED=1|true|yes|on → 每次啟動清空並重新寫入種子資料
+ * - POS_SEED=0|false|no|off → 不寫入種子（含空庫）
+ * - 未設定 → 僅首次（無員工時）寫入種子
  */
 const path = require('node:path');
 const fs = require('node:fs');
@@ -130,9 +133,11 @@ CREATE TABLE IF NOT EXISTS orders (
   remark TEXT,
   created_at DATETIME DEFAULT (datetime('now','localtime')),
   cashier_id INTEGER,
-  shift_id INTEGER,
+  business_day_id INTEGER,
+  business_date TEXT,
   ordered_at DATETIME,
-  submit_count INTEGER DEFAULT 0
+  submit_count INTEGER DEFAULT 0,
+  guest_count INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS order_items (
@@ -148,14 +153,17 @@ CREATE TABLE IF NOT EXISTS order_items (
   FOREIGN KEY(order_id) REFERENCES orders(id)
 );
 
-CREATE TABLE IF NOT EXISTS shift_records (
+CREATE TABLE IF NOT EXISTS business_days (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  business_date TEXT NOT NULL,
+  opening_cash REAL NOT NULL DEFAULT 0,
+  counted_cash REAL,
   start_time DATETIME,
   end_time DATETIME,
   total_sales REAL DEFAULT 0,
   cash_amount REAL DEFAULT 0,
   order_count INTEGER DEFAULT 0,
-  cashier_id INTEGER,
+  cashier_id INTEGER NOT NULL,
   status TEXT DEFAULT 'open'
 );
 
@@ -212,10 +220,48 @@ const DEFAULT_SETTINGS = {
   business_mode: 'table',
 };
 
-function seed() {
+/** @returns {'force'|'off'|'once'} */
+function getSeedMode() {
+  const raw = process.env.POS_SEED;
+  if (raw === undefined || String(raw).trim() === '') return 'once';
+  const v = String(raw).trim().toLowerCase();
+  if (v === '0' || v === 'false' || v === 'no' || v === 'off') return 'off';
+  if (v === '1' || v === 'true' || v === 'yes' || v === 'on') return 'force';
+  return 'once';
+}
+
+/** 清空業務／種子相關資料（供 POS_SEED=1 每次啟動重種） */
+function clearSeedData(d) {
+  d.exec('BEGIN');
+  try {
+    d.exec('DELETE FROM order_items');
+    d.exec('DELETE FROM orders');
+    d.exec('DELETE FROM product_options');
+    d.exec('DELETE FROM option_items');
+    d.exec('DELETE FROM option_groups');
+    d.exec('DELETE FROM products');
+    d.exec('DELETE FROM categories');
+    d.exec('DELETE FROM tables');
+    d.exec('DELETE FROM payment_methods');
+    d.exec('DELETE FROM staff');
+    d.exec('DELETE FROM business_days');
+    try { d.exec('DELETE FROM shift_records'); } catch { /* 舊表可能已移除 */ }
+    d.exec('DELETE FROM time_slots');
+    d.exec('DELETE FROM settings');
+    try { d.exec('DELETE FROM sqlite_sequence'); } catch { /* 尚無 AUTOINCREMENT 列時可略 */ }
+    d.exec('COMMIT');
+  } catch (e) {
+    d.exec('ROLLBACK');
+    throw e;
+  }
+}
+
+function seed({ force = false } = {}) {
   const d = getDb();
-  const staffCount = d.prepare('SELECT COUNT(*) AS c FROM staff').get().c;
-  if (staffCount > 0) return;
+  if (!force) {
+    const staffCount = d.prepare('SELECT COUNT(*) AS c FROM staff').get().c;
+    if (staffCount > 0) return;
+  }
 
   const insertSetting = d.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)');
   for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) insertSetting.run(k, v);
@@ -230,7 +276,9 @@ function seed() {
   insertPay.run('alipay', '支付寶', 1, 0, 2);
   insertPay.run('octopus', '八達通', 1, 0, 3);
   insertPay.run('fps', '轉數快', 1, 0, 4);
-  insertPay.run('credit', '記帳', 1, 0, 5);
+  // 外賣平台：啟用供報表／結賬記錄，收銀台操作面板不顯示（前端過濾）
+  insertPay.run('keepta', 'Keepta', 1, 0, 90);
+  insertPay.run('foodpanda', 'foodpanda', 1, 0, 91);
 
   const insertCat = d.prepare('INSERT INTO categories (name, sort_order) VALUES (?, ?)');
   const cats = ['飲品', '咖啡', '快餐', '小食', '甜點'];
@@ -267,7 +315,6 @@ function seed() {
 
   const insertTable = d.prepare('INSERT INTO tables (table_number, area, capacity) VALUES (?, ?, ?)');
   for (let i = 1; i <= 18; i++) insertTable.run(`A${i}`, '大廳', 4);
-  for (let i = 1; i <= 18; i++) insertTable.run(`B${i}`, '包廂', 4);
   for (let i = 1; i <= 10; i++) insertTable.run(`KP${i}`, 'keepta 外賣區', 4);
   for (let i = 1; i <= 10; i++) insertTable.run(`FP${i}`, 'foodpanda 外賣區', 4);
 }
@@ -290,6 +337,27 @@ function migrate() {
   add('order_items', 'sent_at', 'sent_at DATETIME');
   add('orders', 'ordered_at', 'ordered_at DATETIME');
   add('orders', 'submit_count', 'submit_count INTEGER DEFAULT 0');
+  add('orders', 'guest_count', 'guest_count INTEGER DEFAULT 0');
+  add('orders', 'business_day_id', 'business_day_id INTEGER');
+  add('orders', 'business_date', 'business_date TEXT');
+  // 營業日表（取代交接班）；既有庫補建
+  d.exec(`CREATE TABLE IF NOT EXISTS business_days (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    business_date TEXT NOT NULL,
+    opening_cash REAL NOT NULL DEFAULT 0,
+    counted_cash REAL,
+    start_time DATETIME,
+    end_time DATETIME,
+    total_sales REAL DEFAULT 0,
+    cash_amount REAL DEFAULT 0,
+    order_count INTEGER DEFAULT 0,
+    cashier_id INTEGER NOT NULL,
+    status TEXT DEFAULT 'open'
+  )`);
+  add('business_days', 'counted_cash', 'counted_cash REAL');
+  // 既有訂單補營業日 = 建立日
+  d.prepare(`UPDATE orders SET business_date = date(created_at)
+    WHERE business_date IS NULL AND created_at IS NOT NULL`).run();
   // 信用卡 → 轉數快（FPS）；並校正已存在的 fps 名稱／手續費
   const cardPm = d.prepare("SELECT id FROM payment_methods WHERE code = 'card'").get();
   if (cardPm) {
@@ -301,6 +369,19 @@ function migrate() {
     }
   }
   d.prepare("UPDATE payment_methods SET name = '轉數快', fee_rate = 0 WHERE code = 'fps'").run();
+  // 移除包廂桌位（B1–B18）
+  d.prepare("DELETE FROM tables WHERE area = '包廂'").run();
+  // 補上外賣平台支付方式（既有庫）
+  const ensurePm = (code, name, sort) => {
+    if (!d.prepare('SELECT id FROM payment_methods WHERE code = ?').get(code)) {
+      d.prepare('INSERT INTO payment_methods (code, name, is_enabled, fee_rate, sort_order) VALUES (?, ?, 1, 0, ?)')
+        .run(code, name, sort);
+    }
+  };
+  ensurePm('keepta', 'Keepta', 90);
+  ensurePm('foodpanda', 'foodpanda', 91);
+  // 移除「記帳」支付方式
+  d.prepare("DELETE FROM payment_methods WHERE code = 'credit'").run();
 }
 
 /* ---------------- 種子：粉麵餐店菜單（套餐向導 + 飲品時段計價） ---------------- */
@@ -439,8 +520,25 @@ function initDb() {
   openDb();
   db.exec(SCHEMA);
   migrate();
-  seed();
+
+  const mode = getSeedMode();
   const d = getDb();
+
+  if (mode === 'off') {
+    console.log('[POS] Seeding skipped (POS_SEED=0)');
+    return;
+  }
+
+  if (mode === 'force') {
+    console.log('[POS] POS_SEED enabled — clearing and reseeding database');
+    clearSeedData(d);
+    seed({ force: true });
+    seedNoodleMenu(d);
+    return;
+  }
+
+  // once：僅空庫／尚未寫入 menu_v2 時補種
+  seed();
   const seeded = d.prepare("SELECT value FROM settings WHERE key = 'menu_v2_seeded'").get();
   if (!seeded) seedNoodleMenu(d);
 }

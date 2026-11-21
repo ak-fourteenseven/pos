@@ -23,6 +23,8 @@ const METHOD_ICONS = {
   fps: { img: '/payment-icons/fps.png?v=2' },
   card: { img: '/payment-icons/fps.png?v=2' },
   credit: { emoji: '📒' },
+  keepta: { emoji: '🛵' },
+  foodpanda: { emoji: '🐼' },
 };
 
 async function save(pm) {
@@ -51,6 +53,7 @@ async function toggle(pm) {
   <div class="h-full overflow-y-auto p-5">
     <p class="text-sm text-gray-500 mb-4">
       啟用或停用支付方式；停用後收銀台不再顯示。手續費率僅供統計參考。
+      Keepta / foodpanda 為外賣桌區預設支付，不會出現在收銀台操作面板。
     </p>
 
     <div class="grid sm:grid-cols-2 gap-4">

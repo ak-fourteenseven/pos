@@ -58,6 +58,11 @@ function check(name, ok, extra = '') {
   await page.waitForURL((url) => new URL(url).pathname === '/', { timeout: 8000 }).catch(() => {});
   await page.waitForTimeout(800);
   await page.click('button:has-text("收銀台")');
+  await page.waitForTimeout(800);
+  const openBtn = page.locator('button:has-text("確認開市")');
+  if (await openBtn.count()) {
+    await openBtn.click();
+  }
   await page.waitForURL('**/pos', { timeout: 8000 });
   await page.waitForTimeout(1500);
 

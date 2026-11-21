@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router';
 import { api } from '@shared/api';
 import { useAuthStore } from '@shared/stores/auth';
 import { useCatalogStore } from '@shared/stores/catalog';
+import { useBusinessDayStore } from '@shared/stores/businessDay';
 import { usePosStore } from '../stores/pos';
 import { useToastStore } from '@shared/stores/toast';
 import Modal from '@shared/components/Modal.vue';
@@ -11,15 +12,22 @@ import ComboWizard from '../components/ComboWizard.vue';
 import DrinkModal from '../components/DrinkModal.vue';
 import KitchenTicketModal from '../components/KitchenTicketModal.vue';
 import {
-  fmtMoney, hexA, PAYMENT_META, QUICK_REMARKS,
+  fmtMoney, hexA, PAYMENT_META, QUICK_REMARKS, isPlatformPayment, paymentForTableArea,
 } from '@shared/utils/format';
 import { currentSlot, modifiersSum, slotRuleText } from '@shared/utils/pricing';
 
 const auth = useAuthStore();
 const catalog = useCatalogStore();
+const businessDay = useBusinessDayStore();
 const pos = usePosStore();
 const toast = useToastStore();
 const router = useRouter();
+
+/** Keepta / foodpanda 桌：支付鎖定為平台方式，操作面板支付格不可點 */
+const paymentsLocked = computed(() => {
+  const t = catalog.tables.find((x) => Number(x.id) === Number(pos.tableId));
+  return !!paymentForTableArea(t?.area);
+});
 
 /* ---------------- 菜品區（套餐菜單） ---------------- */
 const activeCategory = ref('all');
@@ -90,10 +98,16 @@ const productEmptySlots = computed(() => {
 });
 
 const paymentItems = computed(() =>
-  (catalog.enabledPayments || []).map((pm) => ({ type: 'payment', id: `pay-${pm.id}`, pm })),
+  (catalog.actionPayments || []).map((pm) => ({
+    type: 'payment',
+    id: `pay-${pm.id}`,
+    pm,
+    disabled: paymentsLocked.value,
+  })),
 );
 const opItems = computed(() => [
   { type: 'price', id: 'price', icon: '改', label: '改價' },
+  { type: 'guests', id: 'guests', icon: '人', label: '改人數', disabled: !pos.tableId },
   { type: 'tables', id: 'tables', icon: '🪑', label: '桌台' },
   { type: 'move', id: 'move', icon: '🔄', label: '換桌', disabled: !pos.tableId },
   {
@@ -118,6 +132,14 @@ const opItems = computed(() => [
     label: '分單',
     disabled: !(pos.hasServerOrder && pos.items.length > 1),
   },
+  {
+    type: 'dayend',
+    id: 'dayend',
+    icon: '日',
+    label: '日結',
+    danger: true,
+    disabled: !businessDay.current,
+  },
 ]);
 
 const payPageMeta = computed(() => pageMeta(paymentItems.value.length, PAY_CAPACITY, payPage.value));
@@ -136,19 +158,24 @@ const opEmptySlots = computed(() => {
 
 function onActionClick(item) {
   if (item.disabled) {
-    if (item.type === 'move') toast.error('目前不是桌台單，無法換桌');
+    if (item.type === 'payment') toast.error('此外賣桌台已固定支付方式，無法切換');
+    else if (item.type === 'guests') toast.error('目前不是桌台單，無法改人數');
+    else if (item.type === 'move') toast.error('目前不是桌台單，無法換桌');
     else if (item.type === 'void') toast.error(auth.isManager ? '尚無訂單可作廢' : '作廢需店長權限');
     else if (item.type === 'reprint') toast.error('尚未下單，無廚房單可補印');
     else if (item.type === 'split') toast.error('需已下單且購物車超過 1 項才能分單');
+    else if (item.type === 'dayend') toast.error('尚未開市，無法日結');
     return;
   }
   if (item.type === 'payment') pos.setPayment(item.pm.code);
   else if (item.type === 'price') openPriceModal();
+  else if (item.type === 'guests') openGuestsModal();
   else if (item.type === 'tables') router.push('/tables');
   else if (item.type === 'move') moveModal.value = true;
   else if (item.type === 'void') voidModal.value = true;
   else if (item.type === 'reprint') reprintTicket();
   else if (item.type === 'split') openSplit();
+  else if (item.type === 'dayend') openDayEnd();
 }
 
 function gridWidth(cols, cell) {
@@ -221,6 +248,9 @@ const splitForm = ref({ selectedIds: [], tableId: null });
 const priceModal = ref(false);
 const priceForm = ref({ price: 0 });
 const priceDigits = ref('');
+const guestsModal = ref(false);
+const guestsForm = ref({ count: 0 });
+const guestsDigits = ref('');
 const cashPayModal = ref(false);
 const wizardProduct = ref(null);
 const drinkProduct = ref(null);
@@ -261,6 +291,10 @@ function applyNumPad(digitsRef, key, onValue, maxLen = 8) {
 
 function onPriceNumPad(key) {
   applyNumPad(priceDigits, key, (v) => { priceForm.value.price = v; });
+}
+
+function onGuestsNumPad(key) {
+  applyNumPad(guestsDigits, key, (v) => { guestsForm.value.count = v; }, 3);
 }
 
 function onCashNumPad(key) {
@@ -392,6 +426,7 @@ async function moveToTable(t) {
     await api.patch(`/orders/${pos.orderId}`, { table_id: t.id });
     pos.tableId = t.id;
     pos.tableNumber = t.table_number;
+    pos.applyPaymentForTable(t.id);
     await catalog.reloadTables();
     moveModal.value = false;
     toast.success(`已換桌至 ${t.table_number}`);
@@ -496,6 +531,65 @@ async function voidOrder() {
 function afterReceipt() {
   receipt.value = null;
   receiptTab.value = 'customer';
+}
+
+/* ---------------- 日結 ---------------- */
+const dayEndModal = ref(false);
+const dayEndSummary = ref(null);
+const dayEnding = ref(false);
+const dayEndCashDigits = ref('');
+const dayEndCountedCash = ref(0);
+
+const dayEndExpectedCash = computed(() => {
+  const s = dayEndSummary.value;
+  if (!s) return 0;
+  if (s.expected_cash != null) return Number(s.expected_cash) || 0;
+  return (Number(s.opening_cash) || 0) + (Number(s.cash_amount) || 0);
+});
+
+const dayEndCashMatch = computed(() => {
+  if (!dayEndCashDigits.value.length) return null;
+  return Number(dayEndCountedCash.value) === Number(dayEndExpectedCash.value);
+});
+
+function payLabel(code) {
+  return PAYMENT_META[code]?.label || code || '—';
+}
+
+function onDayEndCashNumPad(key) {
+  applyNumPad(dayEndCashDigits, key, (v) => { dayEndCountedCash.value = v; });
+}
+
+async function openDayEnd() {
+  if (!businessDay.current) {
+    toast.error('尚未開市，無法日結');
+    return;
+  }
+  try {
+    dayEndSummary.value = await businessDay.loadSummary();
+    dayEndCashDigits.value = '';
+    dayEndCountedCash.value = 0;
+    dayEndModal.value = true;
+  } catch (e) {
+    toast.error(e.message);
+  }
+}
+
+async function confirmDayEnd() {
+  if (!dayEndCashDigits.value.length) {
+    toast.error('請輸入錢箱實點現金');
+    return;
+  }
+  dayEnding.value = true;
+  try {
+    await businessDay.close({ counted_cash: dayEndCountedCash.value });
+    dayEndModal.value = false;
+    router.push('/');
+  } catch (e) {
+    toast.error(e.message);
+  } finally {
+    dayEnding.value = false;
+  }
 }
 
 /* ---------------- 分單 ---------------- */
@@ -612,6 +706,40 @@ async function applyPrice() {
   }
 }
 
+/* ---------------- 改人數（桌台用餐人數） ---------------- */
+function openGuestsModal() {
+  if (!pos.tableId) {
+    toast.error('目前不是桌台單，無法改人數');
+    return;
+  }
+  const n = Math.max(0, Number(pos.guestCount) || 0);
+  guestsForm.value = { count: n };
+  guestsDigits.value = n ? String(n) : '';
+  guestsModal.value = true;
+}
+async function applyGuests() {
+  if (!pos.tableId) {
+    toast.error('目前不是桌台單，無法改人數');
+    guestsModal.value = false;
+    return;
+  }
+  const n = Math.max(0, Math.min(999, Math.floor(Number(guestsForm.value.count) || 0)));
+  try {
+    if (typeof pos.setGuestCount === 'function') {
+      await pos.setGuestCount(n);
+    } else if (pos.orderId) {
+      const updated = await api.patch(`/orders/${pos.orderId}`, { guest_count: n });
+      pos.guestCount = Math.max(0, Number(updated?.guest_count) || n);
+    } else {
+      pos.guestCount = n;
+    }
+    guestsModal.value = false;
+    toast.success(`已改人數為 ${pos.guestCount} 人`);
+  } catch (e) {
+    toast.error(e.message);
+  }
+}
+
 function paymentMeta(m) {
   return PAYMENT_META[m] || { label: m, icon: '💰' };
 }
@@ -625,6 +753,7 @@ function shortOrderNo(no) {
 const showOrderNo = computed(() => !!pos.orderNo && pos.items.some((i) => i.sent));
 
 const cashShort = computed(() => pos.paymentMethod === 'cash' && pos.received > 0 && pos.received < pos.total);
+const isPlatformPay = computed(() => isPlatformPayment(pos.paymentMethod) || paymentsLocked.value);
 </script>
 
 <template>
@@ -641,7 +770,7 @@ const cashShort = computed(() => pos.paymentMethod === 'cash' && pos.received > 
           >
             <span class="ico">{{ pos.tableId ? '🪑' : '🥡' }}</span>
             <template v-if="pos.tableId">
-              {{ pos.tableNumber }}<template v-if="showOrderNo"> · {{ shortOrderNo(pos.orderNo) }}</template>
+              {{ pos.tableNumber }}<template v-if="pos.guestCount > 0"> · {{ pos.guestCount }}人</template><template v-if="showOrderNo"> · {{ shortOrderNo(pos.orderNo) }}</template>
             </template>
             <template v-else-if="showOrderNo">外帶 / 快餐 · {{ shortOrderNo(pos.orderNo) }}</template>
             <template v-else>快餐模式（未開台）</template>
@@ -848,10 +977,15 @@ const cashShort = computed(() => pos.paymentMethod === 'cash' && pos.received > 
               v-for="item in pagedPayments"
               :key="item.id"
               type="button"
-              class="rounded-xl border-2 text-center transition active:scale-95 flex flex-col items-center justify-center gap-0.5 px-1 overflow-hidden box-border"
-              :class="pos.paymentMethod === item.pm.code
-                ? 'border-brand-500 bg-brand-50'
-                : 'border-gray-200 hover:border-brand-300'"
+              class="rounded-xl border-2 text-center transition flex flex-col items-center justify-center gap-0.5 px-1 overflow-hidden box-border"
+              :class="[
+                item.disabled ? 'opacity-40 cursor-not-allowed' : 'active:scale-95',
+                !item.disabled && pos.paymentMethod === item.pm.code
+                  ? 'border-brand-500 bg-brand-50'
+                  : 'border-gray-200',
+                !item.disabled ? 'hover:border-brand-300' : '',
+              ]"
+              :disabled="item.disabled"
               :style="{ width: `${actionCellSize}px`, height: `${actionCellSize}px` }"
               @click="onActionClick(item)"
             >
@@ -1008,6 +1142,14 @@ const cashShort = computed(() => pos.paymentMethod === 'cash' && pos.received > 
         <div class="flex justify-between items-baseline gap-2 pt-0.5">
           <span class="font-extrabold text-sm">應收</span>
           <span class="text-lg xl:text-xl font-extrabold text-brand-600 tabular-nums">{{ fmtMoney(pos.total, catalog.currency) }}</span>
+        </div>
+        <div
+          v-if="paymentMeta(pos.paymentMethod).label"
+          class="flex justify-between gap-2 text-gray-500"
+          :class="isPlatformPay ? 'text-sky-600 font-semibold' : ''"
+        >
+          <span>支付{{ isPlatformPay ? '（外賣預設）' : '' }}</span>
+          <span class="tabular-nums">{{ paymentMeta(pos.paymentMethod).label }}</span>
         </div>
       </div>
 
@@ -1286,6 +1428,46 @@ const cashShort = computed(() => pos.paymentMethod === 'cash' && pos.received > 
       </template>
     </Modal>
 
+    <!-- ============ 改人數（數字鍵盤） ============ -->
+    <Modal v-model="guestsModal" title="改人數" width="max-w-sm">
+      <div class="space-y-3">
+        <div class="bg-gray-50 rounded-xl px-4 py-3 space-y-1.5 text-sm">
+          <div class="flex justify-between gap-3">
+            <span class="text-gray-500 shrink-0">桌台</span>
+            <span class="font-extrabold text-right truncate">{{ pos.tableNumber || '—' }}</span>
+          </div>
+          <div class="flex justify-between">
+            <span class="text-gray-500">目前人數</span>
+            <span class="font-bold">{{ pos.guestCount || 0 }} 人</span>
+          </div>
+        </div>
+
+        <div class="rounded-xl bg-white border-2 border-brand-200 px-3 py-2 flex items-center justify-between gap-2">
+          <span class="text-xs text-gray-400 shrink-0">新人數</span>
+          <span class="font-extrabold text-2xl text-brand-700 tabular-nums truncate">
+            {{ Number(guestsForm.count) || 0 }} 人
+          </span>
+        </div>
+
+        <div class="grid grid-cols-3 gap-2">
+          <button
+            v-for="key in NUM_PAD_KEYS"
+            :key="key"
+            type="button"
+            class="h-12 rounded-xl border-2 border-gray-200 font-extrabold text-lg transition active:scale-95 hover:border-brand-300 hover:bg-brand-50"
+            :class="key === 'C' || key === '⌫' ? 'text-gray-500' : 'text-gray-800'"
+            @click="onGuestsNumPad(key)"
+          >
+            {{ key }}
+          </button>
+        </div>
+      </div>
+      <template #footer>
+        <button class="btn-ghost" @click="guestsModal = false">取消</button>
+        <button class="btn-primary" @click="applyGuests">確認改人數</button>
+      </template>
+    </Modal>
+
     <!-- ============ 現金收現（數字鍵盤） ============ -->
     <Modal v-model="cashPayModal" title="現金收現" width="max-w-sm">
       <div class="space-y-3">
@@ -1343,6 +1525,116 @@ const cashShort = computed(() => pos.paymentMethod === 'cash' && pos.received > 
         <button class="btn-ghost" @click="cashPayModal = false">取消</button>
         <button class="btn-primary" :disabled="Number(pos.received) < pos.total" @click="confirmCashPay">
           確認收款 {{ fmtMoney(pos.received || 0, catalog.currency) }}
+        </button>
+      </template>
+    </Modal>
+
+    <!-- ============ 日結 ============ -->
+    <Modal v-model="dayEndModal" title="日結" width="max-w-md">
+      <div v-if="dayEndSummary" class="space-y-3">
+        <div class="bg-gray-50 rounded-xl px-4 py-3 text-sm space-y-1.5">
+          <div class="flex justify-between">
+            <span class="text-gray-500">營業日</span>
+            <span class="font-extrabold">{{ dayEndSummary.business_date }}</span>
+          </div>
+          <div class="flex justify-between">
+            <span class="text-gray-500">開市時間</span>
+            <span class="font-bold">{{ dayEndSummary.start_time }}</span>
+          </div>
+          <div class="flex justify-between border-t border-gray-200 pt-1.5">
+            <span class="text-gray-500">訂單數</span>
+            <span class="font-bold">{{ dayEndSummary.order_count }}</span>
+          </div>
+          <div class="flex justify-between">
+            <span class="text-gray-500">總營業額</span>
+            <span class="font-extrabold text-brand-600 text-lg">{{ fmtMoney(dayEndSummary.total_sales, catalog.currency) }}</span>
+          </div>
+        </div>
+
+        <div>
+          <div class="text-xs font-bold text-gray-400 mb-2">按支付方式</div>
+          <div class="space-y-1.5">
+            <div
+              v-for="p in dayEndSummary.by_payment"
+              :key="p.payment_method"
+              class="flex items-center justify-between rounded-lg border border-gray-100 px-3 py-2 text-sm"
+            >
+              <span class="font-bold">{{ payLabel(p.payment_method) }}
+                <span class="text-gray-400 font-normal text-xs ml-1">×{{ p.order_count }}</span>
+              </span>
+              <span class="font-extrabold">{{ fmtMoney(p.amount, catalog.currency) }}</span>
+            </div>
+            <div v-if="!(dayEndSummary.by_payment || []).length" class="text-center text-gray-300 py-4 text-sm">
+              本日尚無已結帳訂單
+            </div>
+          </div>
+        </div>
+
+        <div class="rounded-xl border border-gray-200 p-3 space-y-2">
+          <div class="text-xs font-bold text-gray-400">錢箱對帳</div>
+          <div class="flex justify-between text-sm">
+            <span class="text-gray-500">開市現金</span>
+            <span class="font-bold">{{ fmtMoney(dayEndSummary.opening_cash, catalog.currency) }}</span>
+          </div>
+          <div class="flex justify-between text-sm">
+            <span class="text-gray-500">現金收款</span>
+            <span class="font-bold">{{ fmtMoney(dayEndSummary.cash_amount, catalog.currency) }}</span>
+          </div>
+          <div class="flex justify-between text-sm border-t border-gray-100 pt-1.5">
+            <span class="text-gray-500">應有現金</span>
+            <span class="font-extrabold text-brand-700">{{ fmtMoney(dayEndExpectedCash, catalog.currency) }}</span>
+          </div>
+
+          <div
+            class="rounded-xl bg-white border-2 px-3 py-2 flex items-center justify-between gap-2"
+            :class="dayEndCashMatch === null
+              ? 'border-brand-200'
+              : dayEndCashMatch
+                ? 'border-emerald-400'
+                : 'border-red-400'"
+          >
+            <span class="text-xs text-gray-400 shrink-0">實點現金</span>
+            <div class="flex items-center gap-2 min-w-0">
+              <span class="font-extrabold text-2xl tabular-nums truncate"
+                :class="dayEndCashMatch === null
+                  ? 'text-brand-700'
+                  : dayEndCashMatch
+                    ? 'text-emerald-700'
+                    : 'text-red-600'"
+              >
+                {{ fmtMoney(dayEndCountedCash, catalog.currency) }}
+              </span>
+              <span
+                v-if="dayEndCashMatch !== null"
+                class="text-xl font-extrabold shrink-0"
+                :class="dayEndCashMatch ? 'text-emerald-600' : 'text-red-500'"
+                :title="dayEndCashMatch ? '與應有現金相符' : '與應有現金不符'"
+              >
+                {{ dayEndCashMatch ? '✓' : '✗' }}
+              </span>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-3 gap-2">
+            <button
+              v-for="key in NUM_PAD_KEYS"
+              :key="`dayend-${key}`"
+              type="button"
+              class="h-12 rounded-xl border-2 border-gray-200 font-extrabold text-lg transition active:scale-95 hover:border-brand-300 hover:bg-brand-50"
+              :class="key === 'C' || key === '⌫' ? 'text-gray-500' : 'text-gray-800'"
+              @click="onDayEndCashNumPad(key)"
+            >
+              {{ key }}
+            </button>
+          </div>
+        </div>
+
+        <p class="text-xs text-gray-400">確認日結後將關閉本日營業日，需重新開市才能繼續收銀。</p>
+      </div>
+      <template #footer>
+        <button class="btn-ghost" :disabled="dayEnding" @click="dayEndModal = false">取消</button>
+        <button class="btn-danger" :disabled="dayEnding || !dayEndCashDigits.length" @click="confirmDayEnd">
+          {{ dayEnding ? '日結中…' : '確認日結' }}
         </button>
       </template>
     </Modal>

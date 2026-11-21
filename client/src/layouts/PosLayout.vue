@@ -4,7 +4,7 @@ import { useRoute, useRouter } from 'vue-router';
 import { api } from '@shared/api';
 import { useAuthStore } from '@shared/stores/auth';
 import { useCatalogStore } from '@shared/stores/catalog';
-import { useShiftStore } from '@shared/stores/shift';
+import { useBusinessDayStore } from '@shared/stores/businessDay';
 import { useToastStore } from '@shared/stores/toast';
 import { usePosStore } from '../stores/pos';
 import Modal from '@shared/components/Modal.vue';
@@ -14,7 +14,7 @@ const route = useRoute();
 const router = useRouter();
 const auth = useAuthStore();
 const catalog = useCatalogStore();
-const shift = useShiftStore();
+const businessDay = useBusinessDayStore();
 const toast = useToastStore();
 const pos = usePosStore();
 
@@ -23,9 +23,6 @@ const navFront = [
   { path: '/pos', title: '收銀台', icon: '🧾' },
   { path: '/tables', title: '桌台視圖', icon: '🪑' },
 ];
-
-const shiftModal = ref(false);
-const closing = ref(false);
 
 /* ---------------- 今日訂單 ---------------- */
 const ordersModal = ref(false);
@@ -37,7 +34,8 @@ const refundReason = ref('');
 
 async function openOrders() {
   try {
-    todayOrders.value = await api.get(`/orders?date=${today()}&limit=100`);
+    const bd = businessDay.current?.business_date || today();
+    todayOrders.value = await api.get(`/orders?business_date=${bd}&limit=100`);
     ordersDetail.value = null;
     ordersModal.value = true;
   } catch (e) {
@@ -70,7 +68,8 @@ async function voidOrderRow(o) {
   if (!confirm(`確定作廢訂單 ${o.order_no}？此操作無法復原。`)) return;
   try {
     await api.post(`/orders/${o.id}/void`);
-    todayOrders.value = await api.get(`/orders?date=${today()}&limit=100`);
+    const bd = businessDay.current?.business_date || today();
+    todayOrders.value = await api.get(`/orders?business_date=${bd}&limit=100`);
     ordersDetail.value = null;
     toast.success('訂單已作廢');
   } catch (e) {
@@ -87,7 +86,8 @@ async function confirmRefund() {
   try {
     const res = await api.post(`/orders/${refundTarget.value.id}/refund`, { reason: refundReason.value });
     refundModal.value = false;
-    todayOrders.value = await api.get(`/orders?date=${today()}&limit=100`);
+    const bd = businessDay.current?.business_date || today();
+    todayOrders.value = await api.get(`/orders?business_date=${bd}&limit=100`);
     ordersDetail.value = null;
     toast.success(`已退款 ${fmtMoney(res.refunded_amount, catalog.currency)}`);
   } catch (e) {
@@ -126,32 +126,19 @@ onMounted(async () => {
     toast.error(e.message);
   }
   try {
-    await shift.loadCurrent();
-  } catch { /* 未登入時忽略 */ }
+    await businessDay.loadCurrent();
+    if (!businessDay.current) {
+      toast.error('尚未開市，請先開啟營業日');
+      router.replace('/');
+    }
+  } catch {
+    router.replace('/');
+  }
 });
 
 function logout() {
   auth.logout();
   router.push('/login');
-}
-async function openShift() {
-  try {
-    await shift.open();
-  } catch (e) {
-    toast.error(e.message);
-  }
-}
-async function closeShift() {
-  closing.value = true;
-  try {
-    const rec = await shift.close();
-    shiftModal.value = false;
-    toast.success(`結班完成，營業額 ${fmtMoney(rec.total_sales, catalog.currency)}`);
-  } catch (e) {
-    toast.error(e.message);
-  } finally {
-    closing.value = false;
-  }
 }
 
 const pageTitle = computed(() => route.meta.title || '');
@@ -207,15 +194,13 @@ const pageTitle = computed(() => route.meta.title || '');
       <header class="h-12 xl:h-14 bg-white border-b border-gray-200 flex items-center px-3 xl:px-5 gap-2 xl:gap-3 shrink-0">
         <h1 class="text-base xl:text-lg font-extrabold truncate">{{ pageTitle }}</h1>
         <div class="flex-1" />
-        <button
-          class="btn-ghost btn-sm shrink-0"
-          :class="shift.current ? '!border-emerald-300 !text-emerald-600' : ''"
-          @click="shiftModal = true"
+        <div
+          v-if="businessDay.current"
+          class="chip bg-emerald-50 text-emerald-700 shrink-0"
+          :title="`開市 ${businessDay.current.start_time}`"
         >
-          <span class="w-2 h-2 rounded-full" :class="shift.current ? 'bg-emerald-500' : 'bg-gray-300'" />
-          <span class="hidden sm:inline">{{ shift.current ? `交接班中 ${fmtTime(shift.current.start_time)}` : '未開始交接班' }}</span>
-          <span class="sm:hidden">{{ shift.current ? '交班中' : '未交班' }}</span>
-        </button>
+          營業日 {{ businessDay.current.business_date }}
+        </div>
         <div class="chip bg-gray-100 text-gray-600 shrink-0 max-w-[9rem] xl:max-w-none truncate">
           {{ auth.user?.name }}<span class="hidden md:inline">（{{ auth.user?.role === 'manager' ? '店長' : '收銀員' }}）</span>
         </div>
@@ -226,25 +211,6 @@ const pageTitle = computed(() => route.meta.title || '');
         <router-view />
       </main>
     </div>
-
-    <!-- 交接班彈窗 -->
-    <Modal v-model="shiftModal" title="交接班" width="max-w-md">
-      <template v-if="shift.current">
-        <div class="text-sm text-gray-600 space-y-2">
-          <p>本班開始時間：<b class="text-gray-800">{{ shift.current.start_time }}</b></p>
-          <p class="text-gray-400 text-xs">結班後將自動統計本班營業額、現金收款與訂單數，並生成交接班報表。</p>
-        </div>
-      </template>
-      <template v-else>
-        <p class="text-sm text-gray-600">開始新班別後，本班的訂單將歸入此交接班記錄，方便日後對帳。</p>
-      </template>
-      <template #footer>
-        <button v-if="!shift.current" class="btn-primary" @click="openShift">開始交接班</button>
-        <button v-else class="btn-danger" :disabled="closing" @click="closeShift">
-          {{ closing ? '結班中…' : '結束本班並結班' }}
-        </button>
-      </template>
-    </Modal>
 
     <!-- ============ 今日訂單 ============ -->
     <Modal v-model="ordersModal" title="今日訂單" width="max-w-2xl">

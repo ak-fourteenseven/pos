@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia';
 import { api } from '../api';
+import { isPlatformPayment } from '../utils/format';
 
 /** 門店基礎資料：分類 / 菜品 / 桌台 / 支付方式 / 設定 / 套餐菜單 / 時段 */
 export const useCatalogStore = defineStore('catalog', {
@@ -16,6 +17,10 @@ export const useCatalogStore = defineStore('catalog', {
   getters: {
     availableProducts: (s) => s.products.filter((p) => Number(p.is_available) === 1),
     enabledPayments: (s) => s.payments.filter((p) => Number(p.is_enabled) === 1),
+    /** 收銀台操作面板：排除外賣平台預設支付 */
+    actionPayments: (s) => s.payments.filter(
+      (p) => Number(p.is_enabled) === 1 && !isPlatformPayment(p.code),
+    ),
     serviceRate: (s) => Number(s.settings.service_fee_rate || 0),
     currency: (s) => s.settings.currency || 'NT$',
     storeName: (s) => s.settings.store_name || '本地 POS',

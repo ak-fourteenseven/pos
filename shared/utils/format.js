@@ -58,8 +58,26 @@ export const PAYMENT_META = {
   fps: { label: '轉數快', icon: '/payment-icons/fps.png?v=2', img: true },
   /** @deprecated 舊資料相容：信用卡已改為轉數快 */
   card: { label: '轉數快', icon: '/payment-icons/fps.png?v=2', img: true },
+  /** @deprecated 已從種子／支付清單移除；保留供舊訂單顯示 */
   credit: { label: '記帳', icon: '📒' },
+  keepta: { label: 'Keepta', icon: '🛵' },
+  foodpanda: { label: 'foodpanda', icon: '🐼' },
 };
+
+/** 外賣平台支付（不顯示於收銀台操作面板，依桌區自動套用） */
+export const PLATFORM_PAYMENT_CODES = ['keepta', 'foodpanda'];
+
+export function isPlatformPayment(code) {
+  return PLATFORM_PAYMENT_CODES.includes(String(code || ''));
+}
+
+/** 依桌台區域回傳預設支付代碼；非外賣區回傳 null */
+export function paymentForTableArea(area) {
+  const a = String(area || '').toLowerCase();
+  if (a.includes('keepta') || a.includes('keeta')) return 'keepta';
+  if (a.includes('foodpanda')) return 'foodpanda';
+  return null;
+}
 
 export const ORDER_STATUS = {
   open: { label: '點餐中', cls: 'bg-brand-100 text-brand-700' },

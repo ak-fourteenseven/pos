@@ -2,6 +2,7 @@ import { acceptHMRUpdate, defineStore } from 'pinia';
 import { api } from '@shared/api';
 import { useCatalogStore } from '@shared/stores/catalog';
 import { useToastStore } from '@shared/stores/toast';
+import { paymentForTableArea } from '@shared/utils/format';
 
 /**
  * 收銀台購物車
@@ -16,6 +17,8 @@ export const usePosStore = defineStore('pos', {
     orderNo: '',
     tableId: null,
     tableNumber: '',
+    /** 桌台用餐人數 */
+    guestCount: 0,
     items: [], // { id, product_id, name, emoji, color, price, qty, spec, remark, spec_diff }
     /** 購物車目前選中的明細 id（單選；無選中為 null） */
     selectedItemId: null,
@@ -54,6 +57,7 @@ export const usePosStore = defineStore('pos', {
       this.orderNo = '';
       this.tableId = null;
       this.tableNumber = '';
+      this.guestCount = 0;
       this.items = [];
       this.selectedItemId = null;
       this.discount = 0;
@@ -82,6 +86,14 @@ export const usePosStore = defineStore('pos', {
       const id = typeof itemOrId === 'object' ? itemOrId.id : itemOrId;
       return String(this.selectedItemId) === String(id);
     },
+    /** 依桌台區域套用預設支付（Keepta / foodpanda）；大廳等維持現金 */
+    applyPaymentForTable(tableId) {
+      if (!tableId) return;
+      const t = useCatalogStore().tables.find((x) => Number(x.id) === Number(tableId));
+      const platform = paymentForTableArea(t?.area);
+      this.paymentMethod = platform || 'cash';
+      if (platform) this.received = 0;
+    },
     /** 開台後綁定服務端訂單 */
     bindOrder(order, tableNumber) {
       this.reset();
@@ -89,7 +101,20 @@ export const usePosStore = defineStore('pos', {
       this.orderNo = order.order_no;
       this.tableId = order.table_id;
       this.tableNumber = tableNumber || '';
+      this.guestCount = Math.max(0, Number(order.guest_count) || 0);
       this.items = (order.items || []).map((it) => this.mapItem(it));
+      this.applyPaymentForTable(order.table_id);
+    },
+    /** 改桌台用餐人數 */
+    async setGuestCount(n) {
+      const count = Math.max(0, Math.min(999, Math.floor(Number(n) || 0)));
+      if (this.orderId) {
+        const updated = await api.patch(`/orders/${this.orderId}`, { guest_count: count });
+        this.guestCount = Math.max(0, Number(updated?.guest_count) || count);
+        return this.guestCount;
+      }
+      this.guestCount = count;
+      return count;
     },
     mapItem(it) {
       let options = null;
@@ -234,6 +259,14 @@ export const usePosStore = defineStore('pos', {
       this.discountLabel = label;
     },
     setPayment(method) {
+      // 外賣桌區鎖定平台支付，不接受操作面板切換
+      const t = useCatalogStore().tables.find((x) => Number(x.id) === Number(this.tableId));
+      const platform = paymentForTableArea(t?.area);
+      if (platform) {
+        this.paymentMethod = platform;
+        this.received = 0;
+        return;
+      }
       this.paymentMethod = method;
       if (method !== 'cash') this.received = 0;
     },
@@ -306,11 +339,15 @@ export const usePosStore = defineStore('pos', {
           this.syncSelection();
         }
       }
-      if (this.paymentMethod === 'cash' && Number(this.received || 0) < this.total) {
+      // 外賣桌區強制平台支付（與後端覆寫一致）
+      const t = useCatalogStore().tables.find((x) => Number(x.id) === Number(this.tableId));
+      const platformPay = paymentForTableArea(t?.area);
+      const method = platformPay || this.paymentMethod;
+      if (method === 'cash' && Number(this.received || 0) < this.total) {
         throw new Error(`收現金額不足（應收 ${this.total}）`);
       }
       const paid = await api.post(`/orders/${orderId}/pay`, {
-        payment_method: this.paymentMethod,
+        payment_method: method,
         discount_amount: this.discount,
         received_amount: this.received,
       });

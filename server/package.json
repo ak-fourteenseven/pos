@@ -5,7 +5,7 @@
   "description": "POS 本地服務端：Node 內建 SQLite（node:sqlite）+ Express REST API",
   "main": "src/index.js",
   "scripts": {
-    "dev": "node --experimental-sqlite --watch src/index.js",
+    "dev": "node --experimental-sqlite --watch src/dev-entry.js",
     "start": "node --experimental-sqlite src/index.js"
   },
   "dependencies": {

@@ -2,7 +2,7 @@
 import { computed, onMounted, ref } from 'vue';
 import { api } from '@shared/api';
 import { useCatalogStore } from '@shared/stores/catalog';
-import { useShiftStore } from '@shared/stores/shift';
+import { useBusinessDayStore } from '@shared/stores/businessDay';
 import { useToastStore } from '@shared/stores/toast';
 import BarChart from '../../components/charts/BarChart.vue';
 import LineChart from '../../components/charts/LineChart.vue';
@@ -11,7 +11,7 @@ import { downloadCSV, downloadExcel } from '../../utils/export';
 import { fmtDateTime, fmtMoney, fmtNum, fmtPct, thisMonth, today, PAYMENT_META } from '@shared/utils/format';
 
 const catalog = useCatalogStore();
-const shift = useShiftStore();
+const businessDay = useBusinessDayStore();
 const toast = useToastStore();
 
 const tab = ref('daily');
@@ -29,7 +29,10 @@ async function loadDaily() {
   }
 }
 
-const PAYMENT_COLORS = { cash: '#f59e0b', alipay: '#10b981', octopus: '#f97316', fps: '#2563eb', card: '#2563eb', credit: '#8b5cf6' };
+const PAYMENT_COLORS = {
+  cash: '#f59e0b', alipay: '#10b981', octopus: '#f97316', fps: '#2563eb', card: '#2563eb',
+  credit: '#8b5cf6', keepta: '#0ea5e9', foodpanda: '#ec4899',
+};
 const payName = (code) => PAYMENT_META[code]?.label || code;
 
 const paymentDonut = computed(() =>
@@ -158,37 +161,22 @@ function exportProductCSV() {
   toast.success('CSV 已匯出');
 }
 
-/* ---------------- 交接班 ---------------- */
-const closing = ref(false);
-
+/* ---------------- 營業日 ---------------- */
 onMounted(async () => {
   try {
     await catalog.loadAll();
   } catch { /* 忽略 */ }
   await Promise.all([loadDaily(), loadMonthly(), loadProductReport()]);
   try {
-    await shift.loadCurrent();
-    await shift.loadRecords();
+    await businessDay.loadRecords();
   } catch { /* 忽略 */ }
 });
-
-async function doCloseShift() {
-  closing.value = true;
-  try {
-    await shift.close();
-    await shift.loadRecords();
-  } catch (e) {
-    toast.error(e.message);
-  } finally {
-    closing.value = false;
-  }
-}
 
 const tabs = [
   { key: 'daily', label: '日結單' },
   { key: 'monthly', label: '月報表' },
   { key: 'products', label: '菜品分析' },
-  { key: 'shifts', label: '交接班報表' },
+  { key: 'businessDays', label: '營業日報表' },
 ];
 </script>
 
@@ -382,38 +370,34 @@ const tabs = [
       </div>
     </template>
 
-    <!-- ============ 交接班 ============ -->
-    <template v-if="tab === 'shifts'">
-      <div class="card p-5 mb-4">
-        <div class="flex items-center justify-between flex-wrap gap-3">
-          <div>
-            <div class="text-xs text-gray-400 font-bold">目前班別</div>
-            <div v-if="shift.current" class="text-lg font-extrabold mt-1">
-              進行中 · 開始於 {{ shift.current.start_time }}
-            </div>
-            <div v-else class="text-lg font-extrabold mt-1 text-gray-400">尚未開始交接班</div>
-          </div>
-          <button v-if="shift.current" class="btn-danger" :disabled="closing" @click="doCloseShift">
-            {{ closing ? '結班中…' : '結束本班並結班' }}
-          </button>
-          <span v-else class="text-xs text-gray-400">請於頂部導航列點擊「未開始交接班」開班</span>
-        </div>
-      </div>
-
+    <!-- ============ 營業日 ============ -->
+    <template v-if="tab === 'businessDays'">
       <div class="card p-5 overflow-x-auto">
-        <h3 class="font-extrabold mb-3">交接班紀錄</h3>
+        <h3 class="font-extrabold mb-3">營業日紀錄</h3>
+        <p class="text-xs text-gray-400 mb-3">開市與日結請於收銀台操作；此處供查閱歷史紀錄。</p>
         <table class="w-full text-sm">
           <thead>
             <tr class="text-left text-xs text-gray-400 border-b">
-              <th class="py-2">班次</th><th class="py-2">收銀員</th><th class="py-2">開始時間</th>
-              <th class="py-2">結束時間</th><th class="py-2 text-right">營業額</th>
-              <th class="py-2 text-right">現金收款</th><th class="py-2 text-right">訂單數</th><th class="py-2 text-center">狀態</th>
+              <th class="py-2">#</th>
+              <th class="py-2">營業日</th>
+              <th class="py-2">收銀員</th>
+              <th class="py-2 text-right">開市現金</th>
+              <th class="py-2 text-right">實點現金</th>
+              <th class="py-2">開市時間</th>
+              <th class="py-2">日結時間</th>
+              <th class="py-2 text-right">營業額</th>
+              <th class="py-2 text-right">現金收款</th>
+              <th class="py-2 text-right">訂單數</th>
+              <th class="py-2 text-center">狀態</th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="s in shift.records" :key="s.id" class="border-b border-gray-50">
+            <tr v-for="s in businessDay.records" :key="s.id" class="border-b border-gray-50">
               <td class="py-2 font-bold">#{{ s.id }}</td>
+              <td class="py-2 font-bold">{{ s.business_date }}</td>
               <td class="py-2">{{ s.cashier_name || '—' }}</td>
+              <td class="py-2 text-right">{{ fmtMoney(s.opening_cash, cur) }}</td>
+              <td class="py-2 text-right">{{ s.counted_cash != null ? fmtMoney(s.counted_cash, cur) : '—' }}</td>
               <td class="py-2 text-gray-500">{{ fmtDateTime(s.start_time) }}</td>
               <td class="py-2 text-gray-500">{{ s.end_time ? fmtDateTime(s.end_time) : '—' }}</td>
               <td class="py-2 text-right font-bold text-brand-600">{{ fmtMoney(s.total_sales, cur) }}</td>
@@ -421,12 +405,12 @@ const tabs = [
               <td class="py-2 text-right">{{ s.order_count }}</td>
               <td class="py-2 text-center">
                 <span class="chip" :class="s.status === 'open' ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-100 text-gray-500'">
-                  {{ s.status === 'open' ? '進行中' : '已結班' }}
+                  {{ s.status === 'open' ? '營業中' : '已日結' }}
                 </span>
               </td>
             </tr>
-            <tr v-if="!shift.records.length">
-              <td colspan="8" class="py-8 text-center text-gray-300">尚無交接班紀錄</td>
+            <tr v-if="!businessDay.records.length">
+              <td colspan="11" class="py-8 text-center text-gray-300">尚無營業日紀錄</td>
             </tr>
           </tbody>
         </table>
