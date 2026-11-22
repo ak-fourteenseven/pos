@@ -63,7 +63,8 @@ function check(name, ok, extra = '') {
   if (await openBtn.count()) {
     await openBtn.click();
   }
-  await page.waitForURL('**/pos', { timeout: 8000 });
+  await page.waitForURL('**/tables', { timeout: 8000 });
+  await page.goto(`${BASE}/pos`, { waitUntil: 'networkidle' });
   await page.waitForTimeout(1500);
 
   const COMBO = '招牌酸麻辣';

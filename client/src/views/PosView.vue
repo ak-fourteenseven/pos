@@ -108,13 +108,12 @@ const paymentItems = computed(() =>
 const opItems = computed(() => [
   { type: 'price', id: 'price', icon: '改', label: '改價' },
   { type: 'guests', id: 'guests', icon: '人', label: '改人數', disabled: !pos.tableId },
-  { type: 'tables', id: 'tables', icon: '🪑', label: '桌台' },
   { type: 'move', id: 'move', icon: '🔄', label: '換桌', disabled: !pos.tableId },
   {
     type: 'void',
     id: 'void',
     icon: '🚫',
-    label: '作廢',
+    label: pos.hasServerOrder && !pos.orderNo ? '清台' : '作廢',
     danger: true,
     disabled: !(pos.hasServerOrder && auth.isManager),
   },
@@ -170,7 +169,6 @@ function onActionClick(item) {
   if (item.type === 'payment') pos.setPayment(item.pm.code);
   else if (item.type === 'price') openPriceModal();
   else if (item.type === 'guests') openGuestsModal();
-  else if (item.type === 'tables') router.push('/tables');
   else if (item.type === 'move') moveModal.value = true;
   else if (item.type === 'void') voidModal.value = true;
   else if (item.type === 'reprint') reprintTicket();
@@ -517,12 +515,15 @@ async function checkout() {
     toast.error(e.message);
   }
 }
+/** 尚未發放單號 = 未正式下單，作廢改為清台 */
+const isDraftOrder = computed(() => pos.hasServerOrder && !pos.orderNo);
+
 async function voidOrder() {
   try {
-    await pos.voidOrder();
+    const res = await pos.voidOrder();
     await catalog.reloadTables();
     voidModal.value = false;
-    toast.success('訂單已作廢');
+    toast.success(res?.abandoned ? '已清台' : '訂單已作廢');
   } catch (e) {
     toast.error(e.message);
   }
@@ -614,7 +615,7 @@ async function confirmSplit() {
     const newOrder = await pos.splitOrder(splitForm.value.selectedIds, splitForm.value.tableId);
     splitModal.value = false;
     await catalog.reloadTables();
-    toast.success(`已分單：${splitSelectedItems.value.length} 項分出至新訂單 ${newOrder.order_no}`);
+    toast.success(`已分單：${splitSelectedItems.value.length} 項分出至新訂單 ${newOrder.order_no || '（未下單）'}`);
   } catch (e) {
     toast.error(e.message);
   }
@@ -764,6 +765,14 @@ const isPlatformPay = computed(() => isPlatformPayment(pos.paymentMethod) || pay
       <div class="bg-white border-b border-gray-200 px-2 xl:px-4 py-2 xl:py-2.5 flex items-center gap-1.5 xl:gap-2 flex-wrap shrink-0 shadow-[0_1px_0_rgba(0,0,0,0.02)]">
         <!-- 左：目前單據狀態 -->
         <div class="flex items-center gap-1.5 xl:gap-2 pr-2 xl:pr-3 mr-0.5 xl:mr-1 border-r border-gray-200 min-w-0">
+          <button
+            type="button"
+            class="btn btn-sm btn-ghost !gap-1 !px-2 xl:!px-2.5 !py-1 shrink-0"
+            title="返回桌台"
+            @click="router.push('/tables')"
+          >
+            ←
+          </button>
           <span
             class="chip !gap-1.5 !px-2.5 xl:!px-3 !py-1 !text-xs xl:!text-[13px] max-w-[14rem] xl:max-w-none truncate"
             :class="pos.tableId ? 'bg-brand-100 text-brand-700' : showOrderNo ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-600'"
@@ -789,7 +798,7 @@ const isPlatformPay = computed(() => isPlatformPayment(pos.paymentMethod) || pay
         <div class="flex-1 min-w-2" />
 
         <!-- 右：時段資訊（操作鈕已移至下方面板） -->
-        <span class="chip !gap-1.5 !px-2.5 xl:!px-3 !py-1 !text-xs xl:!text-[13px] bg-amber-100 text-amber-700 max-w-[10rem] xl:max-w-none truncate"><span class="ico">🕐</span>{{ slotRuleText(nowSlot) }}</span>
+        <span class="chip !gap-1.5 !px-2.5 xl:!px-3 !py-1 !text-xs xl:!text-[13px] bg-amber-100 text-amber-700 shrink-0 whitespace-nowrap"><span class="ico">🕐</span>{{ slotRuleText(nowSlot) }}</span>
         <span v-if="catalog.serviceRate > 0" class="chip !gap-1.5 !px-2.5 xl:!px-3 !py-1 !text-xs xl:!text-[13px] bg-amber-100 text-amber-700 hidden xl:inline-flex"><span class="ico">💁</span>服務費 {{ catalog.serviceRate }}%</span>
       </div>
 
@@ -1297,14 +1306,17 @@ const isPlatformPay = computed(() => isPlatformPayment(pos.paymentMethod) || pay
       <div v-if="!availableTables.length" class="text-center text-gray-300 py-6">沒有空閒桌台</div>
     </Modal>
 
-    <!-- ============ 作廢確認 ============ -->
-    <Modal v-model="voidModal" title="作廢訂單" width="max-w-sm">
-      <p class="text-sm text-gray-600">
+    <!-- ============ 作廢／清台確認 ============ -->
+    <Modal v-model="voidModal" :title="isDraftOrder ? '清台' : '作廢訂單'" width="max-w-sm">
+      <p v-if="isDraftOrder" class="text-sm text-gray-600">
+        桌台 <b>{{ pos.tableNumber || '—' }}</b> 尚未下單，確定清台？購物車內容將清除，桌台恢復空閒。
+      </p>
+      <p v-else class="text-sm text-gray-600">
         確定作廢訂單 <b>{{ pos.orderNo }}</b>（桌台 {{ pos.tableNumber }}）？作廢後桌台將轉為待清，此操作無法復原。
       </p>
       <template #footer>
         <button class="btn-ghost" @click="voidModal = false">取消</button>
-        <button class="btn-danger" @click="voidOrder">確定作廢</button>
+        <button class="btn-danger" @click="voidOrder">{{ isDraftOrder ? '確定清台' : '確定作廢' }}</button>
       </template>
     </Modal>
 

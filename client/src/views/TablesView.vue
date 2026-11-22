@@ -36,6 +36,17 @@ const areas = computed(() => {
 /** 用餐中 = 点餐中 + 制作中 */
 const busyCount = computed(() => catalog.tables.filter((t) => t.status === 'occupied' || t.status === 'preparing').length);
 
+function isBusyTable(t) {
+  return t.status === 'occupied' || t.status === 'preparing';
+}
+
+/** 用餐中顯示訂單人數；空閒等顯示桌台容納人數 */
+function tablePeopleLabel(t) {
+  const guests = Number(t.guest_count) || 0;
+  if (isBusyTable(t) && guests > 0) return `${guests}人`;
+  return `${t.capacity}人`;
+}
+
 async function reload() {
   try {
     await catalog.reloadTables();
@@ -95,6 +106,15 @@ function toggleMergeSelect(t) {
   }
 }
 
+/** 點擊桌卡：併桌模式選桌；用餐中則進入收銀台 */
+function onTableCardClick(t) {
+  if (mergeMode.value) {
+    if (isBusyTable(t)) toggleMergeSelect(t);
+    return;
+  }
+  if (isBusyTable(t)) continueOrder(t);
+}
+
 async function doMerge() {
   if (mergeSelected.value.length !== 2) {
     toast.error('請選擇兩個用餐中的桌台進行併桌');
@@ -135,42 +155,55 @@ async function doMerge() {
       </template>
     </div>
 
-    <!-- 桌台看板 -->
+    <!-- 桌台看板：每列最多 10 格；固定 桌號/人數 → 金額 → 操作，高度一致 -->
     <div v-for="[area, list] in areas" :key="area" class="mb-5">
       <h2 class="text-xs font-extrabold text-gray-500 mb-2">{{ area }}（{{ list.length }} 桌）</h2>
-      <div class="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-9 xl:grid-cols-10 gap-2">
+      <div class="grid grid-cols-5 sm:grid-cols-8 md:grid-cols-10 gap-2">
         <div
           v-for="t in list"
           :key="t.id"
-          class="rounded-lg border-2 px-2 py-1.5 transition cursor-pointer"
+          class="rounded-lg border-2 px-1.5 py-1.5 transition cursor-pointer flex flex-col gap-0.5 min-h-[5.25rem]"
           :class="[
             TABLE_STATUS[t.status]?.cls,
-            mergeMode && (t.status === 'occupied' || t.status === 'preparing') ? 'hover:shadow-md' : '',
+            isBusyTable(t) ? 'hover:shadow-md' : '',
             mergeSelected.includes(t.id) ? 'ring-2 ring-brand-400' : '',
           ]"
-          @click="mergeMode && (t.status === 'occupied' || t.status === 'preparing') && toggleMergeSelect(t)"
+          @click="onTableCardClick(t)"
         >
-          <div class="flex items-center justify-between">
-            <span class="text-sm font-extrabold">{{ t.table_number }}</span>
-            <span class="w-1.5 h-1.5 rounded-full shrink-0" :class="TABLE_STATUS[t.status]?.dot" />
+          <div class="flex items-baseline justify-between gap-0.5 min-w-0">
+            <span class="text-sm font-extrabold leading-none truncate">{{ t.table_number }}</span>
+            <span class="text-[10px] font-bold leading-none shrink-0">{{ tablePeopleLabel(t) }}</span>
           </div>
-          <div class="text-[10px] text-gray-400 leading-tight">{{ t.capacity }}人</div>
+          <div
+            class="text-[10px] font-bold leading-tight tabular-nums h-4 flex items-center"
+            :class="isBusyTable(t) ? '' : 'invisible'"
+            :aria-hidden="!isBusyTable(t)"
+          >
+            {{ fmtMoney(t.total_amount || 0, catalog.currency) }}
+          </div>
 
-          <template v-if="t.status === 'occupied' || t.status === 'preparing'">
-            <div class="text-xs font-bold mt-0.5">{{ fmtMoney(t.total_amount || 0, catalog.currency) }}</div>
-            <button class="btn-primary btn-xs w-full mt-1 !py-1 !text-[10px] !rounded-md" @click.stop="continueOrder(t)">
-              {{ t.status === 'preparing' ? '點餐/結賬' : '點餐' }}
-            </button>
-          </template>
-          <template v-else-if="t.status === 'available'">
-            <button class="btn-ghost btn-xs w-full mt-1 !py-1 !text-[10px] !rounded-md" @click.stop="openTable(t)">開台</button>
-          </template>
-          <template v-else-if="t.status === 'cleaning'">
-            <button class="btn-ghost btn-xs w-full mt-1 !py-1 !text-[10px] !rounded-md" @click.stop="clearTable(t)">清台</button>
-          </template>
-          <template v-else>
-            <button class="btn-ghost btn-xs w-full mt-1 !py-1 !text-[10px] !rounded-md" @click.stop="cancelReserve(t)">取消預訂</button>
-          </template>
+          <button
+            v-if="isBusyTable(t)"
+            class="btn-primary btn-xs w-full mt-auto !px-0.5 !py-1 !text-[10px] !rounded-md whitespace-nowrap"
+            @click.stop="continueOrder(t)"
+          >
+            {{ t.status === 'preparing' ? '點餐/結賬' : '點餐' }}
+          </button>
+          <button
+            v-else-if="t.status === 'available'"
+            class="btn-ghost btn-xs w-full mt-auto !px-0.5 !py-1 !text-[10px] !rounded-md whitespace-nowrap"
+            @click.stop="openTable(t)"
+          >開台</button>
+          <button
+            v-else-if="t.status === 'cleaning'"
+            class="btn-ghost btn-xs w-full mt-auto !px-0.5 !py-1 !text-[10px] !rounded-md whitespace-nowrap"
+            @click.stop="clearTable(t)"
+          >清台</button>
+          <button
+            v-else
+            class="btn-ghost btn-xs w-full mt-auto !px-0.5 !py-1 !text-[10px] !rounded-md whitespace-nowrap"
+            @click.stop="cancelReserve(t)"
+          >取消預訂</button>
         </div>
       </div>
     </div>

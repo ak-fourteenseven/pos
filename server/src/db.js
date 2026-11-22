@@ -2,7 +2,7 @@
  * 本地 SQLite 資料庫（使用 Node 內建 node:sqlite，無需原生編譯）
  * - 資料庫檔案：server/data/pos.db
  * - 所有時間欄位使用本地時間（datetime('now','localtime')）
- * - POS_SEED=1|true|yes|on → 每次啟動清空並重新寫入種子資料
+ * - POS_SEED=1|true|yes|on → 每次啟動覆寫預設 settings；不清空營業日／訂單；空庫時仍補種主檔
  * - POS_SEED=0|false|no|off → 不寫入種子（含空庫）
  * - 未設定 → 僅首次（無員工時）寫入種子
  */
@@ -120,7 +120,7 @@ CREATE TABLE IF NOT EXISTS settings (
 
 CREATE TABLE IF NOT EXISTS orders (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  order_no TEXT UNIQUE NOT NULL,
+  order_no TEXT UNIQUE,
   table_id INTEGER,
   total_amount REAL DEFAULT 0,
   discount_amount REAL DEFAULT 0,
@@ -230,41 +230,19 @@ function getSeedMode() {
   return 'once';
 }
 
-/** 清空業務／種子相關資料（供 POS_SEED=1 每次啟動重種） */
-function clearSeedData(d) {
-  d.exec('BEGIN');
-  try {
-    d.exec('DELETE FROM order_items');
-    d.exec('DELETE FROM orders');
-    d.exec('DELETE FROM product_options');
-    d.exec('DELETE FROM option_items');
-    d.exec('DELETE FROM option_groups');
-    d.exec('DELETE FROM products');
-    d.exec('DELETE FROM categories');
-    d.exec('DELETE FROM tables');
-    d.exec('DELETE FROM payment_methods');
-    d.exec('DELETE FROM staff');
-    d.exec('DELETE FROM business_days');
-    try { d.exec('DELETE FROM shift_records'); } catch { /* 舊表可能已移除 */ }
-    d.exec('DELETE FROM time_slots');
-    d.exec('DELETE FROM settings');
-    try { d.exec('DELETE FROM sqlite_sequence'); } catch { /* 尚無 AUTOINCREMENT 列時可略 */ }
-    d.exec('COMMIT');
-  } catch (e) {
-    d.exec('ROLLBACK');
-    throw e;
-  }
-}
-
-function seed({ force = false } = {}) {
-  const d = getDb();
-  if (!force) {
-    const staffCount = d.prepare('SELECT COUNT(*) AS c FROM staff').get().c;
-    if (staffCount > 0) return;
-  }
-
+/** 覆寫預設門店 settings（不清空其他表；自訂 key 如 menu_v2_seeded 會保留） */
+function seedSettings(d = getDb()) {
   const insertSetting = d.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)');
   for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) insertSetting.run(k, v);
+}
+
+/** 空庫時寫入員工／支付／示範菜單主檔（不清空既有資料） */
+function seed() {
+  const d = getDb();
+  const staffCount = d.prepare('SELECT COUNT(*) AS c FROM staff').get().c;
+  if (staffCount > 0) return;
+
+  seedSettings(d);
 
   const insertStaff = d.prepare('INSERT INTO staff (username, password, name, role) VALUES (?, ?, ?, ?)');
   insertStaff.run('admin', hashPassword('123456'), '王店長', 'manager');
@@ -382,6 +360,64 @@ function migrate() {
   ensurePm('foodpanda', 'foodpanda', 91);
   // 移除「記帳」支付方式
   d.prepare("DELETE FROM payment_methods WHERE code = 'credit'").run();
+  // 單號改為下單送廚時才發放：既有庫放寬 order_no NOT NULL
+  migrateOrderNoNullable(d);
+}
+
+/** SQLite 無法直接 DROP NOT NULL，需重建 orders 表（暫時關閉 FK） */
+function migrateOrderNoNullable(d) {
+  const info = d.prepare('PRAGMA table_info(orders)').all();
+  const orderNoCol = info.find((c) => c.name === 'order_no');
+  if (!orderNoCol || orderNoCol.notnull !== 1) return;
+
+  const destCols = [
+    'id', 'order_no', 'table_id', 'total_amount', 'discount_amount', 'service_fee',
+    'pay_amount', 'received_amount', 'change_amount', 'payment_method', 'status',
+    'remark', 'created_at', 'cashier_id', 'business_day_id', 'business_date',
+    'ordered_at', 'submit_count', 'guest_count', 'refunded_at', 'refund_reason', 'refunded_by',
+  ];
+  const srcNames = new Set(info.map((c) => c.name));
+  const copyCols = destCols.filter((c) => srcNames.has(c));
+
+  d.exec('PRAGMA foreign_keys = OFF');
+  try {
+    d.exec('BEGIN');
+    d.exec(`
+      CREATE TABLE orders__new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        order_no TEXT UNIQUE,
+        table_id INTEGER,
+        total_amount REAL DEFAULT 0,
+        discount_amount REAL DEFAULT 0,
+        service_fee REAL DEFAULT 0,
+        pay_amount REAL DEFAULT 0,
+        received_amount REAL DEFAULT 0,
+        change_amount REAL DEFAULT 0,
+        payment_method TEXT,
+        status TEXT DEFAULT 'open',
+        remark TEXT,
+        created_at DATETIME DEFAULT (datetime('now','localtime')),
+        cashier_id INTEGER,
+        business_day_id INTEGER,
+        business_date TEXT,
+        ordered_at DATETIME,
+        submit_count INTEGER DEFAULT 0,
+        guest_count INTEGER DEFAULT 0,
+        refunded_at TEXT,
+        refund_reason TEXT,
+        refunded_by INTEGER
+      );
+    `);
+    d.exec(`INSERT INTO orders__new (${copyCols.join(',')}) SELECT ${copyCols.join(',')} FROM orders`);
+    d.exec('DROP TABLE orders');
+    d.exec('ALTER TABLE orders__new RENAME TO orders');
+    d.exec('COMMIT');
+  } catch (e) {
+    try { d.exec('ROLLBACK'); } catch { /* ignore */ }
+    throw e;
+  } finally {
+    d.exec('PRAGMA foreign_keys = ON');
+  }
 }
 
 /* ---------------- 種子：粉麵餐店菜單（套餐向導 + 飲品時段計價） ---------------- */
@@ -530,14 +566,11 @@ function initDb() {
   }
 
   if (mode === 'force') {
-    console.log('[POS] POS_SEED enabled — clearing and reseeding database');
-    clearSeedData(d);
-    seed({ force: true });
-    seedNoodleMenu(d);
-    return;
+    console.log('[POS] POS_SEED enabled — upserting default settings (preserving business days / orders)');
+    seedSettings(d);
   }
 
-  // once：僅空庫／尚未寫入 menu_v2 時補種
+  // once／force：僅空庫補種主檔；尚未寫入 menu_v2 時補種粉麵菜單
   seed();
   const seeded = d.prepare("SELECT value FROM settings WHERE key = 'menu_v2_seeded'").get();
   if (!seeded) seedNoodleMenu(d);

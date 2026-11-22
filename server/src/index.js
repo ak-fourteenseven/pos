@@ -351,7 +351,7 @@ app.put('/api/time-slots', managerOnly, (req, res) => {
 app.get('/api/tables', (req, res) => {
   const db = getDb();
   const rows = db.prepare(`
-    SELECT t.*, o.id AS order_id, o.order_no, o.total_amount, o.created_at AS opened_at,
+    SELECT t.*, o.id AS order_id, o.order_no, o.total_amount, o.guest_count, o.created_at AS opened_at,
       (SELECT COALESCE(SUM(oi.quantity), 0) FROM order_items oi WHERE oi.order_id = o.id) AS item_count
     FROM tables t
     LEFT JOIN orders o ON o.id = t.current_order_id AND o.status IN ('open', 'ordered')
@@ -396,14 +396,14 @@ app.patch('/api/tables/:id/status', (req, res) => {
   db.prepare('UPDATE tables SET status = ?, current_order_id = NULL WHERE id = ?').run(status, t.id);
   ok(res, { updated: true });
 });
-/** 開台：建立進行中的訂單 */
+/** 開台：建立進行中的訂單（暫不發放 order_no，下單送廚時才發） */
 app.post('/api/tables/:id/open', (req, res) => {
   const db = getDb();
   const t = db.prepare('SELECT * FROM tables WHERE id = ?').get(req.params.id);
   if (!t) return fail(res, '桌台不存在', 404);
   if (t.status === 'occupied' || t.status === 'preparing') return fail(res, '桌台已在用餐中');
-  const r = db.prepare(`INSERT INTO orders (order_no, table_id, status, cashier_id)
-    VALUES (?, ?, 'open', ?)`).run(genOrderNo(db), t.id, req.user.id);
+  const r = db.prepare(`INSERT INTO orders (table_id, status, cashier_id)
+    VALUES (?, 'open', ?)`).run(t.id, req.user.id);
   const orderId = Number(r.lastInsertRowid);
   db.prepare("UPDATE tables SET status = 'occupied', current_order_id = ? WHERE id = ?").run(orderId, t.id);
   ok(res, orderWithItems(db, orderId));
@@ -428,7 +428,8 @@ app.post('/api/orders/:id/split', (req, res) => {
     if (t.status === 'occupied' || t.status === 'preparing') return fail(res, '目標桌台已在用餐中');
     if (order.table_id && Number(table_id) === order.table_id) return fail(res, '目標桌台不能是當前桌台');
   }
-  const newOrderNo = genOrderNo(db);
+  /* 來源單尚未發號時，分出單也暫不發號；已發號則立即發新號 */
+  const newOrderNo = order.order_no ? genOrderNo(db) : null;
   const r = db.prepare(`INSERT INTO orders (order_no, table_id, status, remark, cashier_id)
     VALUES (?, ?, 'open', '分單', ?)`).run(newOrderNo, table_id || null, req.user.id);
   const newOrderId = Number(r.lastInsertRowid);
@@ -510,9 +511,9 @@ app.post('/api/orders', (req, res) => {
     if (!t) return fail(res, '桌台不存在', 404);
     if (t.status === 'occupied') return fail(res, '桌台已在用餐中');
   }
-  const orderNo = genOrderNo(db);
-  const r = db.prepare(`INSERT INTO orders (order_no, table_id, status, remark, cashier_id)
-    VALUES (?, ?, ?, ?, ?)`).run(orderNo, table_id ?? null, status, remark ?? null, req.user.id);
+  /* 單號於首次下單送廚時發放；此處僅建草稿訂單 */
+  const r = db.prepare(`INSERT INTO orders (table_id, status, remark, cashier_id)
+    VALUES (?, ?, ?, ?)`).run(table_id ?? null, status, remark ?? null, req.user.id);
   const orderId = Number(r.lastInsertRowid);
   for (const it of items) {
     const p = db.prepare('SELECT * FROM products WHERE id = ?').get(it.product_id);
@@ -585,7 +586,7 @@ app.delete('/api/orders/:id/items/:itemId', (req, res) => {
   recomputeOrderTotal(db, order.id);
   ok(res, { deleted: true });
 });
-/** 下單（送廚房）：把未送廚明細標記送廚，訂單進入「已送廚」，並回傳廚房單 */
+/** 下單（送廚房）：首次送廚時發放 order_no；標記未送廚明細、訂單進入「已送廚」，並回傳廚房單 */
 app.post('/api/orders/:id/submit', (req, res) => {
   const db = getDb();
   const order = db.prepare('SELECT o.*, t.table_number FROM orders o LEFT JOIN tables t ON t.id = o.table_id WHERE o.id = ?').get(req.params.id);
@@ -597,6 +598,11 @@ app.post('/api/orders/:id/submit', (req, res) => {
   const mark = db.prepare('UPDATE order_items SET sent_at = ? WHERE id = ? AND sent_at IS NULL');
   db.exec('BEGIN');
   try {
+    if (!order.order_no) {
+      const orderNo = genOrderNo(db);
+      db.prepare('UPDATE orders SET order_no = ? WHERE id = ?').run(orderNo, order.id);
+      order.order_no = orderNo;
+    }
     for (const it of pending) mark.run(now, it.id);
     db.prepare(`UPDATE orders SET status = 'ordered', ordered_at = COALESCE(ordered_at, ?),
       submit_count = COALESCE(submit_count, 0) + 1 WHERE id = ?`).run(now, order.id);
@@ -612,6 +618,7 @@ app.post('/api/orders/:id/submit', (req, res) => {
   ok(res, {
     appended: !!order.ordered_at,
     sent_count: pending.length,
+    order_no: order.order_no,
     ticket: buildKitchenTicket(order, pending),
   });
 });
@@ -685,16 +692,33 @@ app.post('/api/orders/:id/pay', (req, res) => {
   if (order.table_id) freeTable(db, order.table_id, 'cleaning');
   ok(res, orderWithItems(db, order.id));
 });
-/** 作廢訂單（店長） */
+/**
+ * 作廢／清台（店長）
+ * - 尚未發放單號（未正式下單）：刪除草稿訂單並將桌台恢復空閒（清台）
+ * - 已發放單號：標記作廢，桌台轉待清
+ */
 app.post('/api/orders/:id/void', managerOnly, (req, res) => {
   const db = getDb();
   const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
   if (!order) return fail(res, '訂單不存在', 404);
   if (order.status === 'voided') return fail(res, '訂單已作廢');
   if (order.status === 'completed') return fail(res, '已結帳訂單不可作廢');
+  if (!order.order_no) {
+    db.exec('BEGIN');
+    try {
+      db.prepare('DELETE FROM order_items WHERE order_id = ?').run(order.id);
+      db.prepare('DELETE FROM orders WHERE id = ?').run(order.id);
+      if (order.table_id) freeTable(db, order.table_id, 'available');
+      db.exec('COMMIT');
+    } catch (e) {
+      db.exec('ROLLBACK');
+      return fail(res, '清台失敗：' + e.message);
+    }
+    return ok(res, { abandoned: true, cleared: true });
+  }
   db.prepare("UPDATE orders SET status = 'voided' WHERE id = ?").run(order.id);
   if (order.table_id) freeTable(db, order.table_id, 'cleaning');
-  ok(res, { updated: true });
+  ok(res, { updated: true, abandoned: false });
 });
 /** 退款（店長）：對已結帳訂單進行退款 */
 app.post('/api/orders/:id/refund', managerOnly, (req, res) => {

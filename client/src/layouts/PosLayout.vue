@@ -59,19 +59,25 @@ async function continueOrder(o) {
     pos.bindOrder(full, o.table_number || '');
     ordersModal.value = false;
     router.push('/pos');
-    toast.success(`已載入訂單 ${full.order_no}`);
+    toast.success(full.order_no ? `已載入訂單 ${full.order_no}` : '已載入桌台點餐（尚未下單）');
   } catch (e) {
     toast.error(e.message);
   }
 }
 async function voidOrderRow(o) {
-  if (!confirm(`確定作廢訂單 ${o.order_no}？此操作無法復原。`)) return;
+  const isDraft = !o.order_no;
+  const msg = isDraft
+    ? `訂單尚未下單${o.table_number ? `（桌台 ${o.table_number}）` : ''}，確定清台？購物車內容將清除。`
+    : `確定作廢訂單 ${o.order_no}？此操作無法復原。`;
+  if (!confirm(msg)) return;
   try {
-    await api.post(`/orders/${o.id}/void`);
+    const res = await api.post(`/orders/${o.id}/void`);
     const bd = businessDay.current?.business_date || today();
     todayOrders.value = await api.get(`/orders?business_date=${bd}&limit=100`);
     ordersDetail.value = null;
-    toast.success('訂單已作廢');
+    if (pos.orderId && Number(pos.orderId) === Number(o.id)) pos.reset();
+    await catalog.reloadTables();
+    toast.success(res?.abandoned ? '已清台' : '訂單已作廢');
   } catch (e) {
     toast.error(e.message);
   }
@@ -222,7 +228,7 @@ const pageTitle = computed(() => route.meta.title || '');
         >
           <button class="w-full flex items-center gap-3 px-4 py-3 hover:bg-gray-50 text-left" @click="showOrderDetail(o)">
             <span class="chip" :class="ORDER_STATUS[o.status]?.cls">{{ ORDER_STATUS[o.status]?.label }}</span>
-            <span class="font-bold text-sm">{{ o.order_no }}</span>
+            <span class="font-bold text-sm">{{ o.order_no || '未下單' }}</span>
             <span class="text-xs text-gray-400">{{ fmtTime(o.created_at) }}</span>
             <span class="text-xs text-gray-400">{{ o.table_number ? `桌台 ${o.table_number}` : '快餐' }}</span>
             <div class="flex-1" />
@@ -245,7 +251,7 @@ const pageTitle = computed(() => route.meta.title || '');
             </div>
             <div class="flex gap-2 pt-1">
               <button v-if="o.status === 'open' && o.table_id" class="btn-primary btn-sm" @click="continueOrder(o)">繼續點餐</button>
-              <button v-if="o.status === 'open'" class="btn-ghost btn-sm !text-red-500" @click="voidOrderRow(o)">作廢</button>
+              <button v-if="o.status === 'open'" class="btn-ghost btn-sm !text-red-500" @click="voidOrderRow(o)">{{ o.order_no ? '作廢' : '清台' }}</button>
               <button v-if="o.status === 'completed' && auth.isManager" class="btn-ghost btn-sm !text-orange-500" @click="openRefund(o)">退款</button>
             </div>
           </div>

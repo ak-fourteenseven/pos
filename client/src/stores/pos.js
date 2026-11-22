@@ -6,8 +6,8 @@ import { paymentForTableArea } from '@shared/utils/format';
 
 /**
  * 收銀台購物車
- * - 開台模式：orderId 不為 null，每次加菜/改動即時同步服務端
- * - 快餐/外帶模式：orderId 為 null，購物車暫存於前端，下單時一次性建立訂單
+ * - 開台模式：orderId 不為 null，每次加菜/改動即時同步服務端；order_no 於首次下單送廚才發放
+ * - 快餐/外帶模式：orderId 為 null，購物車暫存於前端，下單時一次性建立訂單並發號
  */
 let tempSeq = 0;
 
@@ -98,7 +98,7 @@ export const usePosStore = defineStore('pos', {
     bindOrder(order, tableNumber) {
       this.reset();
       this.orderId = order.id;
-      this.orderNo = order.order_no;
+      this.orderNo = order.order_no || '';
       this.tableId = order.table_id;
       this.tableNumber = tableNumber || '';
       this.guestCount = Math.max(0, Number(order.guest_count) || 0);
@@ -307,6 +307,7 @@ export const usePosStore = defineStore('pos', {
         }
       }
       const res = await api.post(`/orders/${orderId}/submit`);
+      if (res?.order_no) this.orderNo = res.order_no;
       // 以服務端狀態刷新購物車（明細帶上 sent_at）
       const full = await api.get(`/orders/${orderId}`);
       if (full) {
@@ -354,11 +355,16 @@ export const usePosStore = defineStore('pos', {
       this.reset();
       return paid;
     },
-    /** 作廢進行中的訂單（店長） */
+    /**
+     * 作廢／清台（店長）
+     * 尚未發單號的草稿會被服務端刪除並清台；已發號則作廢。
+     * @returns {{ abandoned?: boolean, cleared?: boolean, updated?: boolean }}
+     */
     async voidOrder() {
       if (!this.orderId) throw new Error('當前購物車尚未開台，無訂單可作廢');
-      await api.post(`/orders/${this.orderId}/void`);
+      const res = await api.post(`/orders/${this.orderId}/void`);
       this.reset();
+      return res || {};
     },
     /** 分單：把選中明細拆到新訂單，可指定目標桌台 */
     async splitOrder(itemIds, tableId = null) {

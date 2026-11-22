@@ -64,7 +64,8 @@ async function api(p, method = 'GET', body, role = 'manager', uid = 1) {
     if (await openBtn.count()) {
       await openBtn.click();
     }
-    await page.waitForURL('**/pos', { timeout: 8000 }).catch(() => {});
+    await page.waitForURL('**/tables', { timeout: 8000 }).catch(() => {});
+    await page.goto(`${BASE}/pos`, { waitUntil: 'networkidle' });
     await page.waitForTimeout(1200);
   }
   async function closeTicket() {

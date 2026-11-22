@@ -7,12 +7,14 @@ import { useBusinessDayStore } from '@shared/stores/businessDay';
 import { useToastStore } from '@shared/stores/toast';
 import Modal from '@shared/components/Modal.vue';
 import { fmtMoney, today } from '@shared/utils/format';
+import { usePosStore } from '../stores/pos';
 
 const router = useRouter();
 const auth = useAuthStore();
 const catalog = useCatalogStore();
 const businessDay = useBusinessDayStore();
 const toast = useToastStore();
+const pos = usePosStore();
 
 const openModal = ref(false);
 const opening = ref(false);
@@ -43,8 +45,10 @@ function applyNumPad(key) {
   openingCash.value = Number(d) || 0;
 }
 
+/** 進入前台：一律先到桌台視圖，不帶入既有桌台／購物車 */
 function enterPos() {
-  router.push('/pos');
+  pos.reset();
+  router.push('/tables');
 }
 
 function showOpenModal() {

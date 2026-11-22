@@ -59,10 +59,10 @@ async function api(p, method = 'GET', body, role = 'manager', uid = 1) {
     check('A2b 開市彈窗出現', (await bodyText()).includes('開市'));
     await openBtn.click();
   }
-  await page.waitForURL('**/pos', { timeout: 8000 }).catch(() => {});
+  await page.waitForURL('**/tables', { timeout: 8000 }).catch(() => {});
   await page.waitForTimeout(1500);
   const frontNav = await navText();
-  check('A3 進入收銀台', page.url().includes('/pos'));
+  check('A3 進入收銀台先到桌台視圖', page.url().includes('/tables'));
   check('A4 收銀台導航只有收銀台/桌台視圖', frontNav.includes('收銀台') && frontNav.includes('桌台視圖'));
   check('A5 收銀台不出現後台管理選單', !frontNav.includes('菜品管理') && !frontNav.includes('報表統計') && !frontNav.includes('系統設定'));
 
@@ -133,9 +133,9 @@ async function api(p, method = 'GET', body, role = 'manager', uid = 1) {
   await page.waitForTimeout(800);
   const openBtn2 = page.locator('button:has-text("確認開市")');
   if (await openBtn2.count()) await openBtn2.click();
-  await page.waitForURL('**/pos', { timeout: 8000 }).catch(() => {});
+  await page.waitForURL('**/tables', { timeout: 8000 }).catch(() => {});
   await page.waitForTimeout(1500);
-  check('C7 收銀台可正常進入', (await bodyText()).includes('購物車'));
+  check('C7 收銀台可正常進入桌台視圖', page.url().includes('/tables') && ((await bodyText()).includes('桌台') || (await bodyText()).includes('大廳')));
 
   console.log('\n===== 測試結果 =====');
   const failed = results.filter((r) => !r.ok);
