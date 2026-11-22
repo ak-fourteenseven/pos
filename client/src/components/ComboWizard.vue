@@ -57,6 +57,9 @@ watch(() => props.modelValue, (open) => {
     if (st.code === skipCode.value) continue; // 清湯等跳過的組不預選
     if (Number(st.is_multi) === 1) {
       sel[st.code] = [];
+    } else if (!Number(st.required)) {
+      // 選填：不預選，收銀台可直接跳過
+      sel[st.code] = null;
     } else {
       const def = st.items.find((i) => Number(i.is_default) === 1) || st.items[0];
       sel[st.code] = def ? { id: def.id, name: def.name, price_diff: Number(def.price_diff) || 0 } : null;

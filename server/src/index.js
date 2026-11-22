@@ -1003,7 +1003,7 @@ app.get('/api/menu', (req, res) => {
   for (const p of products) {
     const cat = catMap.get(p.category_id);
     let steps;
-    if (categoryHasOptionGroups(db, p.category_id)) {
+    if (categoryHasOptionGroups(db, p.category_id) || Number(p.use_custom_options) === 1) {
       const resolved = resolveProductOptionGroups(db, p);
       const includeDrink = Number(cat?.include_drink_step) === 1;
       steps = buildStepsFromOptionGroups(resolved, includeDrink);

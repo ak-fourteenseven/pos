@@ -34,8 +34,12 @@ const editingGroupId = ref(null);
 const editGroupCode = ref('');
 const editGroupName = ref('');
 const editGroupMulti = ref(false);
-const editGroupRequired = ref(true);
+const editGroupRequired = ref(false);
 const groupDragFrom = ref(null);
+const newGroupCode = ref('');
+const newGroupName = ref('');
+const newGroupMulti = ref(false);
+const newGroupRequired = ref(false);
 const newItemName = ref('');
 const newItemPrice = ref(0);
 const newItemDefault = ref(false);
@@ -259,6 +263,40 @@ function toggleCustomOptions(on) {
   } else {
     prodForm.value.use_custom_options = false;
   }
+}
+
+function addGroup() {
+  const code = String(newGroupCode.value || '').trim();
+  const name = String(newGroupName.value || '').trim();
+  if (!code || !name) {
+    toast.error('請輸入選項組代碼與名稱');
+    return;
+  }
+  const exists = (prodForm.value.product_option_groups || []).some((g) => g.code === code);
+  if (exists) {
+    toast.error('此菜品已有相同代碼的選項組');
+    return;
+  }
+  if (!prodForm.value.use_custom_options) {
+    prodForm.value.use_custom_options = true;
+  }
+  const id = nextTempId();
+  prodForm.value.product_option_groups = [
+    ...(prodForm.value.product_option_groups || []),
+    {
+      id,
+      code,
+      name,
+      is_multi: newGroupMulti.value ? 1 : 0,
+      required: newGroupRequired.value ? 1 : 0,
+      items: [],
+    },
+  ];
+  newGroupCode.value = '';
+  newGroupName.value = '';
+  newGroupMulti.value = false;
+  newGroupRequired.value = false;
+  expandedGroupId.value = id;
 }
 
 function startEditGroup(g) {
@@ -716,8 +754,8 @@ onMounted(async () => {
           </div>
         </div>
 
-        <!-- 選項組覆寫 -->
-        <div v-if="hasCategoryOptionGroups || prodForm.use_custom_options" class="border-t border-gray-100 pt-3">
+        <!-- 選項組：分類預設或菜品自訂（分類可為空，如精美小食） -->
+        <div class="border-t border-gray-100 pt-3">
           <div class="flex items-center justify-between mb-2">
             <label class="label !mb-0">選項組</label>
             <div class="flex items-center gap-3">
@@ -728,7 +766,7 @@ onMounted(async () => {
                   :checked="prodForm.use_custom_options"
                   @change="toggleCustomOptions($event.target.checked)"
                 />
-                覆寫分類選項
+                {{ hasCategoryOptionGroups ? '覆寫分類選項' : '自訂選項組' }}
               </label>
             </div>
           </div>
@@ -744,7 +782,9 @@ onMounted(async () => {
                 {{ g.code }} · {{ (g.items || []).map((it) => it.name).join('、') || '無選項' }}
               </div>
             </div>
-            <p v-if="!categoryDefaultOptionGroups.length" class="text-xs text-gray-300 py-1">分類尚無選項組</p>
+            <p v-if="!categoryDefaultOptionGroups.length" class="text-xs text-gray-300 py-1">
+              分類尚無選項組 · 勾選「自訂選項組」後可為此菜品新增
+            </p>
           </div>
 
           <div v-else class="space-y-2">
@@ -783,7 +823,8 @@ onMounted(async () => {
                 <button type="button" class="flex-1 text-left" @click="expandedGroupId = expandedGroupId === g.id ? null : g.id">
                   <div class="text-sm font-bold text-gray-700">{{ g.name }}</div>
                   <div class="text-[11px] text-gray-400">
-                    {{ g.code }} · {{ Number(g.is_multi) ? '多選' : '單選' }} · {{ (g.items || []).length }} 項
+                    {{ g.code }} · {{ Number(g.is_multi) ? '多選' : '單選' }} · {{ Number(g.required) ? '必選' : '選填' }}
+                    · {{ (g.items || []).length }} 項
                   </div>
                 </button>
                 <button type="button" class="btn-ghost btn-sm" @click.stop="startEditGroup(g)">編輯</button>
@@ -831,6 +872,23 @@ onMounted(async () => {
               </div>
             </div>
             <p v-if="!prodForm.product_option_groups.length" class="text-xs text-gray-300 py-1">尚無選項組</p>
+
+            <div class="rounded-xl border border-dashed border-gray-300 p-2.5 space-y-2">
+              <div class="flex flex-wrap gap-2">
+                <input v-model="newGroupCode" class="input !py-1.5 !text-sm !w-28" placeholder="代碼 e.g. flavor" />
+                <input v-model="newGroupName" class="input !py-1.5 !text-sm flex-1 min-w-[8rem]" placeholder="名稱 e.g. 口味" @keydown.enter.prevent="addGroup" />
+              </div>
+              <div class="flex flex-wrap items-center gap-3 text-xs text-gray-500">
+                <label class="flex items-center gap-1 cursor-pointer">
+                  <input v-model="newGroupMulti" type="checkbox" class="accent-brand-500" />多選
+                </label>
+                <label class="flex items-center gap-1 cursor-pointer">
+                  <input v-model="newGroupRequired" type="checkbox" class="accent-brand-500" />必選
+                </label>
+                <div class="flex-1" />
+                <button type="button" class="btn-ghost btn-sm" @click="addGroup">＋ 新增選項組</button>
+              </div>
+            </div>
           </div>
         </div>
 
