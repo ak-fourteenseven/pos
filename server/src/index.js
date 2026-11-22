@@ -105,7 +105,7 @@ function buildKitchenTicket(order, items) {
     bar,
   };
 }
-function freeTable(db, tableId, status = 'cleaning') {
+function freeTable(db, tableId, status = 'available') {
   db.prepare('UPDATE tables SET status = ?, current_order_id = NULL WHERE id = ?').run(status, tableId);
 }
 /** 清理臨時檔案：刪除失敗不影響業務回應 */
@@ -402,8 +402,9 @@ app.post('/api/tables/:id/open', (req, res) => {
   const t = db.prepare('SELECT * FROM tables WHERE id = ?').get(req.params.id);
   if (!t) return fail(res, '桌台不存在', 404);
   if (t.status === 'occupied' || t.status === 'preparing') return fail(res, '桌台已在用餐中');
-  const r = db.prepare(`INSERT INTO orders (table_id, status, cashier_id)
-    VALUES (?, 'open', ?)`).run(t.id, req.user.id);
+  const guests = Math.max(0, Number(t.capacity) || 0);
+  const r = db.prepare(`INSERT INTO orders (table_id, status, cashier_id, guest_count)
+    VALUES (?, 'open', ?, ?)`).run(t.id, req.user.id, guests);
   const orderId = Number(r.lastInsertRowid);
   db.prepare("UPDATE tables SET status = 'occupied', current_order_id = ? WHERE id = ?").run(orderId, t.id);
   ok(res, orderWithItems(db, orderId));
@@ -642,7 +643,7 @@ app.patch('/api/orders/:id', (req, res) => {
     const t = db.prepare('SELECT * FROM tables WHERE id = ?').get(table_id);
     if (!t) return fail(res, '目標桌台不存在', 404);
     if (t.status === 'occupied') return fail(res, '目標桌台用餐中，請先併桌或選其他桌台');
-    if (order.table_id) freeTable(db, order.table_id, 'cleaning');
+    if (order.table_id) freeTable(db, order.table_id, 'available');
     db.prepare('UPDATE orders SET table_id = ? WHERE id = ?').run(t.id, order.id);
     db.prepare("UPDATE tables SET status = 'occupied', current_order_id = ? WHERE id = ?").run(order.id, t.id);
   }
@@ -689,13 +690,13 @@ app.post('/api/orders/:id/pay', (req, res) => {
     business_day_id = ?, business_date = ?, cashier_id = COALESCE(cashier_id, ?) WHERE id = ?`)
     .run(subtotal, discount, serviceFee, total, received, change, payment_method,
       day.id, day.business_date, req.user.id, order.id);
-  if (order.table_id) freeTable(db, order.table_id, 'cleaning');
+  if (order.table_id) freeTable(db, order.table_id, 'available');
   ok(res, orderWithItems(db, order.id));
 });
 /**
  * 作廢／清台（店長）
- * - 尚未發放單號（未正式下單）：刪除草稿訂單並將桌台恢復空閒（清台）
- * - 已發放單號：標記作廢，桌台轉待清
+ * - 尚未發放單號（未正式下單）：刪除草稿訂單並將桌台恢復空閒
+ * - 已發放單號：標記作廢，桌台恢復空閒
  */
 app.post('/api/orders/:id/void', managerOnly, (req, res) => {
   const db = getDb();
@@ -717,7 +718,7 @@ app.post('/api/orders/:id/void', managerOnly, (req, res) => {
     return ok(res, { abandoned: true, cleared: true });
   }
   db.prepare("UPDATE orders SET status = 'voided' WHERE id = ?").run(order.id);
-  if (order.table_id) freeTable(db, order.table_id, 'cleaning');
+  if (order.table_id) freeTable(db, order.table_id, 'available');
   ok(res, { updated: true, abandoned: false });
 });
 /** 退款（店長）：對已結帳訂單進行退款 */

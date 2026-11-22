@@ -2,12 +2,15 @@
 import { computed, onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { api } from '@shared/api';
+import { useBusinessDayStore } from '@shared/stores/businessDay';
 import { useCatalogStore } from '@shared/stores/catalog';
 import { usePosStore } from '../stores/pos';
 import { useToastStore } from '@shared/stores/toast';
 import { fmtMoney, TABLE_STATUS } from '@shared/utils/format';
+import DayEndModal from '../components/DayEndModal.vue';
 
 const catalog = useCatalogStore();
+const businessDay = useBusinessDayStore();
 const pos = usePosStore();
 const toast = useToastStore();
 const router = useRouter();
@@ -15,6 +18,7 @@ const router = useRouter();
 const loading = ref(false);
 const mergeMode = ref(false);
 const mergeSelected = ref([]); // table ids
+const dayEndModalRef = ref(null);
 
 onMounted(async () => {
   try {
@@ -153,7 +157,15 @@ async function doMerge() {
         <button class="btn-primary btn-sm" @click="doMerge">執行併桌</button>
         <button class="btn-ghost btn-sm" @click="mergeMode = false; mergeSelected = []">取消</button>
       </template>
+      <button
+        class="btn-danger btn-sm"
+        :disabled="!businessDay.current"
+        :title="businessDay.current ? '日結' : '尚未開市，無法日結'"
+        @click="dayEndModalRef?.open()"
+      >日結</button>
     </div>
+
+    <DayEndModal ref="dayEndModalRef" @done="router.push('/')" />
 
     <!-- 桌台看板：每列最多 10 格；固定 桌號/人數 → 金額 → 操作，高度一致 -->
     <div v-for="[area, list] in areas" :key="area" class="mb-5">
@@ -190,15 +202,10 @@ async function doMerge() {
             {{ t.status === 'preparing' ? '點餐/結賬' : '點餐' }}
           </button>
           <button
-            v-else-if="t.status === 'available'"
+            v-else-if="t.status === 'available' || t.status === 'cleaning'"
             class="btn-ghost btn-xs w-full mt-auto !px-0.5 !py-1 !text-[10px] !rounded-md whitespace-nowrap"
             @click.stop="openTable(t)"
           >開台</button>
-          <button
-            v-else-if="t.status === 'cleaning'"
-            class="btn-ghost btn-xs w-full mt-auto !px-0.5 !py-1 !text-[10px] !rounded-md whitespace-nowrap"
-            @click.stop="clearTable(t)"
-          >清台</button>
           <button
             v-else
             class="btn-ghost btn-xs w-full mt-auto !px-0.5 !py-1 !text-[10px] !rounded-md whitespace-nowrap"

@@ -72,6 +72,22 @@ async function api(p, method = 'GET', body, role = 'manager', uid = 1) {
     await page.locator('.fixed:has(h3:has-text("廚房單")) button:has-text("關閉")').click();
     await wait(async () => (await page.locator('.fixed:has(h3:has-text("廚房單"))').count()) === 0);
   }
+  /** 結賬：現金收現（若有）→ 確認小票 → 確認結賬 */
+  async function completeCheckout() {
+    await payBtn().click();
+    await page.waitForTimeout(400);
+    const cashModal = modalOf('現金收現');
+    if (await cashModal.count()) {
+      await cashModal.locator('button:has-text("剛好")').click();
+      await page.waitForTimeout(200);
+      await cashModal.locator('button:has-text("下一步")').click();
+      await page.waitForTimeout(400);
+    }
+    const preview = modalOf('確認結賬');
+    await wait(async () => (await preview.count()) > 0);
+    await preview.locator('button:has-text("確認結賬")').click();
+    await page.waitForTimeout(1200);
+  }
 
   /* =============== A. 快餐：下單送廚 → 結賬 =============== */
   await login('admin', '123456');
@@ -104,13 +120,8 @@ async function api(p, method = 'GET', body, role = 'manager', uid = 1) {
   check('A10 狀態顯示已全部送廚', (await bodyText()).includes('已全部送廚'));
   check('A11 送廚後「結賬」可用', await payBtn().isEnabled());
 
-  await cart().locator('button:has-text("剛好")').click();
-  await page.waitForTimeout(300);
-  await payBtn().click();
-  await page.waitForTimeout(1500);
-  check('A12 結賬成功顯示小票', (await page.locator('.fixed:has(h3:has-text("結帳完成"))').count()) > 0);
-  await page.locator('.fixed:has(h3:has-text("結帳完成")) button:has-text("完成")').click().catch(() => {});
-  await page.waitForTimeout(600);
+  await completeCheckout();
+  check('A12 結賬後回桌台視圖', page.url().includes('/tables'));
 
   /* =============== B. 加菜 → 追加送廚 =============== */
   await menuBtn('薯條').click();
@@ -129,11 +140,7 @@ async function api(p, method = 'GET', body, role = 'manager', uid = 1) {
   check('B3 追加單標註「加菜追加」', ticket2.includes('加菜追加'));
   check('B4 追加單只含新菜品', ticket2.includes('燒賣') && !ticket2.includes('清湯'));
   await closeTicket();
-  await cart().locator('button:has-text("剛好")').click();
-  await page.waitForTimeout(200);
-  await payBtn().click();
-  await page.waitForTimeout(1500);
-  await page.locator('.fixed:has(h3:has-text("結帳完成")) button:has-text("完成")').click().catch(() => {});
+  await completeCheckout();
   await page.waitForTimeout(500);
 
   /* =============== C. 桌台模式流轉 =============== */
@@ -161,20 +168,11 @@ async function api(p, method = 'GET', body, role = 'manager', uid = 1) {
     await card.locator('button:has-text("繼續點餐 / 結賬")').click();
     await page.waitForURL('**/pos', { timeout: 8000 }).catch(() => {});
     await page.waitForTimeout(1000);
-    await cart().locator('button:has-text("剛好")').click();
-    await page.waitForTimeout(200);
-    await payBtn().click();
-    await page.waitForTimeout(1500);
-    check('C4 桌台訂單結賬成功', (await page.locator('.fixed:has(h3:has-text("結帳完成"))').count()) > 0);
-    await page.locator('.fixed:has(h3:has-text("結帳完成")) button:has-text("完成")').click().catch(() => {});
-    await page.waitForTimeout(600);
-
-    await page.goto(`${BASE}/tables`, { waitUntil: 'networkidle' });
-    await page.waitForTimeout(1200);
-    const card2 = page.locator('.card', { hasText: tableNo }).first();
-    check('C5 結賬後桌台顯示待清', (await card2.textContent()).includes('待清'));
-    await card2.locator('button:has-text("清台完成")').click();
+    await completeCheckout();
+    check('C4 桌台訂單結賬後回桌台視圖', page.url().includes('/tables'));
     await page.waitForTimeout(800);
+    const card2 = page.locator('div', { hasText: tableNo }).filter({ has: page.locator('button:has-text("開台")') }).first();
+    check('C5 結賬後桌台恢復空閒可開台', (await card2.count()) > 0);
   } else {
     check('C1 開台成功', false, '沒有可用桌台');
   }

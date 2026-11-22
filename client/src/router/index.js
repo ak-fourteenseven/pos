@@ -38,6 +38,7 @@ const routes = [
     children: [
       { path: 'reports', name: 'admin-reports', component: () => import('../views/admin/ReportsView.vue'), meta: { title: '報表統計', icon: '📊', requiresManager: true } },
       { path: 'products', name: 'admin-products', component: () => import('../views/admin/ProductsView.vue'), meta: { title: '菜品管理', icon: '🍱', requiresManager: true } },
+      { path: 'categories', name: 'admin-categories', component: () => import('../views/admin/CategoriesView.vue'), meta: { title: '菜品分類', icon: '📁', requiresManager: true } },
       { path: 'tables', name: 'admin-tables', component: () => import('../views/admin/TablesAdminView.vue'), meta: { title: '桌台管理', icon: '🪑', requiresManager: true } },
       { path: 'payments', name: 'admin-payments', component: () => import('../views/admin/PaymentsView.vue'), meta: { title: '支付方式', icon: '💳', requiresManager: true } },
       { path: 'staff', name: 'admin-staff', component: () => import('../views/admin/StaffView.vue'), meta: { title: '員工管理', icon: '👥', requiresManager: true } },

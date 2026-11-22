@@ -15,6 +15,7 @@ const toast = useToastStore();
 const navAdmin = [
   { path: '/admin/reports', title: '報表統計', icon: '📊' },
   { path: '/admin/products', title: '菜品管理', icon: '🍱' },
+  { path: '/admin/categories', title: '菜品分類', icon: '📁' },
   { path: '/admin/tables', title: '桌台管理', icon: '🪑' },
   { path: '/admin/payments', title: '支付方式', icon: '💳' },
   { path: '/admin/staff', title: '員工管理', icon: '👥' },

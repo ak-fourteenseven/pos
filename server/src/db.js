@@ -362,6 +362,8 @@ function migrate() {
   d.prepare("DELETE FROM payment_methods WHERE code = 'credit'").run();
   // 單號改為下單送廚時才發放：既有庫放寬 order_no NOT NULL
   migrateOrderNoNullable(d);
+  // 取消「待清」狀態：既有待清桌台改回空閒
+  d.prepare("UPDATE tables SET status = 'available', current_order_id = NULL WHERE status = 'cleaning'").run();
 }
 
 /** SQLite 無法直接 DROP NOT NULL，需重建 orders 表（暫時關閉 FK） */

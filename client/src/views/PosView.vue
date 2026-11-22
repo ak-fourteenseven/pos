@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { api } from '@shared/api';
 import { useAuthStore } from '@shared/stores/auth';
@@ -9,6 +9,7 @@ import { usePosStore } from '../stores/pos';
 import { useToastStore } from '@shared/stores/toast';
 import Modal from '@shared/components/Modal.vue';
 import ComboWizard from '../components/ComboWizard.vue';
+import DayEndModal from '../components/DayEndModal.vue';
 import DrinkModal from '../components/DrinkModal.vue';
 import KitchenTicketModal from '../components/KitchenTicketModal.vue';
 import {
@@ -110,14 +111,6 @@ const opItems = computed(() => [
   { type: 'guests', id: 'guests', icon: '人', label: '改人數', disabled: !pos.tableId },
   { type: 'move', id: 'move', icon: '🔄', label: '換桌', disabled: !pos.tableId },
   {
-    type: 'void',
-    id: 'void',
-    icon: '🚫',
-    label: pos.hasServerOrder && !pos.orderNo ? '清台' : '作廢',
-    danger: true,
-    disabled: !(pos.hasServerOrder && auth.isManager),
-  },
-  {
     type: 'reprint',
     id: 'reprint',
     icon: '🖨️',
@@ -130,6 +123,22 @@ const opItems = computed(() => [
     icon: '✂️',
     label: '分單',
     disabled: !(pos.hasServerOrder && pos.items.length > 1),
+  },
+  {
+    type: 'remove',
+    id: 'remove',
+    icon: '↩',
+    label: '退菜',
+    danger: true,
+    disabled: !pos.selectedItem || (pos.selectedItem.sent && !auth.isManager),
+  },
+  {
+    type: 'void',
+    id: 'void',
+    icon: '🚫',
+    label: pos.hasServerOrder && !pos.orderNo ? '清台' : '作廢',
+    danger: true,
+    disabled: !(pos.hasServerOrder && auth.isManager),
   },
   {
     type: 'dayend',
@@ -158,6 +167,13 @@ const opEmptySlots = computed(() => {
 function onActionClick(item) {
   if (item.disabled) {
     if (item.type === 'payment') toast.error('此外賣桌台已固定支付方式，無法切換');
+    else if (item.type === 'remove') {
+      toast.error(
+        !pos.selectedItem
+          ? '請先在購物車選取要退菜的項目'
+          : '已送廚的菜品需店長權限才能退菜',
+      );
+    }
     else if (item.type === 'guests') toast.error('目前不是桌台單，無法改人數');
     else if (item.type === 'move') toast.error('目前不是桌台單，無法換桌');
     else if (item.type === 'void') toast.error(auth.isManager ? '尚無訂單可作廢' : '作廢需店長權限');
@@ -168,12 +184,13 @@ function onActionClick(item) {
   }
   if (item.type === 'payment') pos.setPayment(item.pm.code);
   else if (item.type === 'price') openPriceModal();
+  else if (item.type === 'remove') removeCartItem(pos.selectedItem);
   else if (item.type === 'guests') openGuestsModal();
   else if (item.type === 'move') moveModal.value = true;
   else if (item.type === 'void') voidModal.value = true;
   else if (item.type === 'reprint') reprintTicket();
   else if (item.type === 'split') openSplit();
-  else if (item.type === 'dayend') openDayEnd();
+  else if (item.type === 'dayend') dayEndModalRef.value?.open();
 }
 
 function gridWidth(cols, cell) {
@@ -239,8 +256,9 @@ const discountModal = ref(false);
 const discountForm = ref({ mode: 'rate', rate: 95, amount: 0 });
 
 const moveModal = ref(false);
-const receipt = ref(null);
 const voidModal = ref(false);
+const removeModal = ref(false);
+const removeTarget = ref(null);
 const splitModal = ref(false);
 const splitForm = ref({ selectedIds: [], tableId: null });
 const priceModal = ref(false);
@@ -255,12 +273,33 @@ const drinkProduct = ref(null);
 const receiptTab = ref('customer');
 const ticketModal = ref(false);
 const ticket = ref(null);
+const cartListRef = ref(null);
+
+function scrollCartToBottom() {
+  const el = cartListRef.value;
+  if (!el) return;
+  el.scrollTop = el.scrollHeight;
+}
+
+/** 購物車內容變更：永遠選中最後一列並捲到底 */
+watch(
+  () => pos.items.map((i) => i.id).join('\0'),
+  async () => {
+    pos.selectLastItem();
+    await nextTick();
+    scrollCartToBottom();
+  },
+  { flush: 'post' },
+);
 
 /* ---------------- 初始化 ---------------- */
 onMounted(async () => {
   try {
     await catalog.loadAll();
     requestAnimationFrame(() => measureActionGrid());
+    pos.selectLastItem();
+    await nextTick();
+    scrollCartToBottom();
   } catch (e) {
     toast.error(e.message);
   }
@@ -466,6 +505,9 @@ async function reprintTicket() {
 }
 
 /* ---------------- 結帳 / 作廢 ---------------- */
+const checkoutPreview = ref(false);
+const checkingOut = ref(false);
+
 function requestCheckout() {
   if (!pos.items.length) {
     toast.error('購物車為空');
@@ -481,7 +523,12 @@ function requestCheckout() {
     cashPayModal.value = true;
     return;
   }
-  checkout();
+  openCheckoutPreview();
+}
+
+function openCheckoutPreview() {
+  receiptTab.value = 'customer';
+  checkoutPreview.value = true;
 }
 
 async function confirmCashPay() {
@@ -490,10 +537,11 @@ async function confirmCashPay() {
     return;
   }
   cashPayModal.value = false;
-  await checkout();
+  openCheckoutPreview();
 }
 
-async function checkout() {
+/** 確認結賬：真正收款後回桌台視圖 */
+async function confirmCheckout() {
   if (!pos.items.length) {
     toast.error('購物車為空');
     return;
@@ -506,13 +554,19 @@ async function checkout() {
     toast.error('收現金額不足');
     return;
   }
+  checkingOut.value = true;
   try {
-    receipt.value = await pos.checkout();
+    await pos.checkout();
+    checkoutPreview.value = false;
     receivedDigits.value = '';
     cashPayModal.value = false;
     await catalog.reloadTables();
+    toast.success('結賬完成');
+    router.push('/tables');
   } catch (e) {
     toast.error(e.message);
+  } finally {
+    checkingOut.value = false;
   }
 }
 /** 尚未發放單號 = 未正式下單，作廢改為清台 */
@@ -524,74 +578,15 @@ async function voidOrder() {
     await catalog.reloadTables();
     voidModal.value = false;
     toast.success(res?.abandoned ? '已清台' : '訂單已作廢');
+    router.push('/tables');
   } catch (e) {
     toast.error(e.message);
   }
 }
 
-function afterReceipt() {
-  receipt.value = null;
-  receiptTab.value = 'customer';
-}
 
 /* ---------------- 日結 ---------------- */
-const dayEndModal = ref(false);
-const dayEndSummary = ref(null);
-const dayEnding = ref(false);
-const dayEndCashDigits = ref('');
-const dayEndCountedCash = ref(0);
-
-const dayEndExpectedCash = computed(() => {
-  const s = dayEndSummary.value;
-  if (!s) return 0;
-  if (s.expected_cash != null) return Number(s.expected_cash) || 0;
-  return (Number(s.opening_cash) || 0) + (Number(s.cash_amount) || 0);
-});
-
-const dayEndCashMatch = computed(() => {
-  if (!dayEndCashDigits.value.length) return null;
-  return Number(dayEndCountedCash.value) === Number(dayEndExpectedCash.value);
-});
-
-function payLabel(code) {
-  return PAYMENT_META[code]?.label || code || '—';
-}
-
-function onDayEndCashNumPad(key) {
-  applyNumPad(dayEndCashDigits, key, (v) => { dayEndCountedCash.value = v; });
-}
-
-async function openDayEnd() {
-  if (!businessDay.current) {
-    toast.error('尚未開市，無法日結');
-    return;
-  }
-  try {
-    dayEndSummary.value = await businessDay.loadSummary();
-    dayEndCashDigits.value = '';
-    dayEndCountedCash.value = 0;
-    dayEndModal.value = true;
-  } catch (e) {
-    toast.error(e.message);
-  }
-}
-
-async function confirmDayEnd() {
-  if (!dayEndCashDigits.value.length) {
-    toast.error('請輸入錢箱實點現金');
-    return;
-  }
-  dayEnding.value = true;
-  try {
-    await businessDay.close({ counted_cash: dayEndCountedCash.value });
-    dayEndModal.value = false;
-    router.push('/');
-  } catch (e) {
-    toast.error(e.message);
-  } finally {
-    dayEnding.value = false;
-  }
-}
+const dayEndModalRef = ref(null);
 
 /* ---------------- 分單 ---------------- */
 const splitTargetTables = computed(() => catalog.tables.filter((t) => t.status === 'available' && t.id !== pos.tableId));
@@ -632,31 +627,32 @@ function drinkSaving(it) {
   return { base: Number(o.drink.base_price), saved };
 }
 
-/** 廚房單文字（後廚 + 水吧分區） */
-const kitchenText = computed(() => {
-  if (!receipt.value) return '';
+/** 廚房單文字（結賬預覽：用購物車明細） */
+const previewKitchenText = computed(() => {
   const food = [];
   const bar = [];
-  const drinkLine = (it, d) => {
+  const drinkLine = (qty, d) => {
     const t = d.temperature === 'HOT' ? '熱' : '凍';
     const prefs = d.preferences && d.preferences.length ? `, ${d.preferences.join(', ')}` : '';
-    bar.push(`${it.quantity}x ${d.name} (${t}${prefs})`);
+    bar.push(`${qty}x ${d.name} (${t}${prefs})`);
   };
-  for (const it of receipt.value.items) {
+  for (const it of pos.items) {
     let o = it.options;
     if (typeof o === 'string') { try { o = JSON.parse(o); } catch { o = null; } }
+    const qty = it.qty ?? it.quantity ?? 1;
     if (o && o.drink && Number(o.drink.product_id) === Number(it.product_id) && !o.base) {
-      drinkLine(it, o.drink); // 獨立飲品
+      drinkLine(qty, o.drink);
     } else if (o && o.base) {
-      food.push(`${it.quantity}x ${o.base}`);
+      food.push(`${qty}x ${o.base}`);
       if (o.noodle) food.push(`     麵: ${o.noodle.name}`);
       if (o.spiciness) food.push(`     辣度: ${o.spiciness.name}`);
       if (o.filling) food.push(`     餡料: ${o.filling.name}`);
       if (o.flavor) food.push(`     口味: ${o.flavor.name}`);
       if (o.toppings && o.toppings.length) food.push(`     加料: ${o.toppings.map((x) => x.name).join(', ')}`);
-      if (o.drink) drinkLine(it, o.drink); // 套餐內飲品同步給水吧
+      if (o.drink) drinkLine(qty, o.drink);
     } else {
-      food.push(`${it.quantity}x ${it.product_name}${it.spec ? ` [${it.spec}]` : ''}${it.remark ? ` (${it.remark})` : ''}`);
+      const name = it.name || it.product_name || '';
+      food.push(`${qty}x ${name}${it.spec ? ` [${it.spec}]` : ''}${it.remark ? ` (${it.remark})` : ''}`);
     }
   }
   const lines = [];
@@ -664,6 +660,58 @@ const kitchenText = computed(() => {
   if (bar.length) { lines.push('', '【水吧】', ...bar); }
   return lines.join('\n');
 });
+
+/** 退菜：未送廚直接刪除；已送廚彈窗確認（且需店長） */
+async function removeCartItem(item) {
+  if (!item) {
+    toast.error('請先在購物車選取要退菜的項目');
+    return;
+  }
+  if (item.sent && !auth.isManager) {
+    toast.error('已送廚的菜品需店長權限才能退菜');
+    return;
+  }
+  if (item.sent) {
+    removeTarget.value = item;
+    removeModal.value = true;
+    return;
+  }
+  await confirmRemoveItem(item);
+}
+
+async function confirmRemoveItem(item = removeTarget.value) {
+  if (!item) {
+    removeModal.value = false;
+    removeTarget.value = null;
+    return;
+  }
+  try {
+    await pos.removeItem(item);
+    removeModal.value = false;
+    removeTarget.value = null;
+    toast.success('已退菜');
+  } catch (e) {
+    toast.error(e.message);
+  }
+}
+
+/** 改數量；減至 0 走退菜流程（已送廚會確認） */
+async function changeCartQty(item, qty) {
+  if (!item || item.sent) {
+    if (item?.sent) toast.error('已送廚不可改數量，請退菜');
+    return;
+  }
+  const q = Number(qty);
+  if (q <= 0) {
+    await removeCartItem(item);
+    return;
+  }
+  try {
+    await pos.setQty(item, q);
+  } catch (e) {
+    toast.error(e.message);
+  }
+}
 
 /* ---------------- 改價（選中列的單價） ---------------- */
 function openPriceModal() {
@@ -753,6 +801,31 @@ function shortOrderNo(no) {
 }
 const showOrderNo = computed(() => !!pos.orderNo && pos.items.some((i) => i.sent));
 
+/** 用餐人數：已設用 guestCount，否則回退桌台容納人數 */
+const tablePeopleDisplay = computed(() => {
+  const guests = Math.max(0, Number(pos.guestCount) || 0);
+  if (guests > 0) return guests;
+  if (!pos.tableId) return 0;
+  const t = catalog.tables.find((x) => Number(x.id) === Number(pos.tableId));
+  return Math.max(0, Number(t?.capacity) || 0);
+});
+
+/** 送廚狀態：空購物車不可顯示「已全部送廚」 */
+const kitchenStatusChip = computed(() => {
+  if (!pos.items.length) {
+    return { icon: '🍽', label: '尚未點餐', short: '未點餐', cls: 'bg-gray-100 text-gray-500' };
+  }
+  if (pos.pendingCount > 0) {
+    return {
+      icon: '⏳',
+      label: `${pos.pendingCount} 項待送廚`,
+      short: `${pos.pendingCount}待送`,
+      cls: 'bg-gray-100 text-gray-500',
+    };
+  }
+  return { icon: '✅', label: '已全部送廚', short: '已送廚', cls: 'bg-emerald-100 text-emerald-700' };
+});
+
 const cashShort = computed(() => pos.paymentMethod === 'cash' && pos.received > 0 && pos.received < pos.total);
 const isPlatformPay = computed(() => isPlatformPayment(pos.paymentMethod) || paymentsLocked.value);
 </script>
@@ -779,7 +852,7 @@ const isPlatformPay = computed(() => isPlatformPayment(pos.paymentMethod) || pay
           >
             <span class="ico">{{ pos.tableId ? '🪑' : '🥡' }}</span>
             <template v-if="pos.tableId">
-              {{ pos.tableNumber }}<template v-if="pos.guestCount > 0"> · {{ pos.guestCount }}人</template><template v-if="showOrderNo"> · {{ shortOrderNo(pos.orderNo) }}</template>
+              {{ pos.tableNumber }}<template v-if="tablePeopleDisplay > 0"> · {{ tablePeopleDisplay }}人</template><template v-if="showOrderNo"> · {{ shortOrderNo(pos.orderNo) }}</template>
             </template>
             <template v-else-if="showOrderNo">外帶 / 快餐 · {{ shortOrderNo(pos.orderNo) }}</template>
             <template v-else>快餐模式（未開台）</template>
@@ -787,11 +860,11 @@ const isPlatformPay = computed(() => isPlatformPayment(pos.paymentMethod) || pay
           <span
             v-if="pos.hasServerOrder"
             class="chip !gap-1.5 !px-2.5 xl:!px-3 !py-1 !text-xs xl:!text-[13px] shrink-0"
-            :class="pos.pendingCount ? 'bg-gray-100 text-gray-500' : 'bg-emerald-100 text-emerald-700'"
+            :class="kitchenStatusChip.cls"
           >
-            <span class="ico">{{ pos.pendingCount ? '⏳' : '✅' }}</span>
-            <span class="hidden sm:inline">{{ pos.pendingCount ? `${pos.pendingCount} 項待送廚` : '已全部送廚' }}</span>
-            <span class="sm:hidden">{{ pos.pendingCount ? `${pos.pendingCount}待送` : '已送廚' }}</span>
+            <span class="ico">{{ kitchenStatusChip.icon }}</span>
+            <span class="hidden sm:inline">{{ kitchenStatusChip.label }}</span>
+            <span class="sm:hidden">{{ kitchenStatusChip.short }}</span>
           </span>
         </div>
 
@@ -1035,7 +1108,7 @@ const isPlatformPay = computed(() => isPlatformPayment(pos.paymentMethod) || pay
       </div>
 
       <!-- 明細 -->
-      <div class="flex-1 overflow-y-auto min-h-0">
+      <div ref="cartListRef" class="flex-1 overflow-y-auto min-h-0">
         <div v-if="!pos.items.length" class="h-full flex flex-col items-center justify-center text-gray-300 gap-2 py-10">
           <div class="text-5xl">🛒</div>
           <div class="text-sm">購物車空空，快來點餐吧</div>
@@ -1098,18 +1171,22 @@ const isPlatformPay = computed(() => isPlatformPayment(pos.paymentMethod) || pay
           <div class="flex flex-col items-end gap-1.5 shrink-0" @click.stop>
             <div class="flex items-center gap-1">
               <button
-                class="w-7 h-7 rounded-lg font-bold"
+                class="w-7 h-7 rounded-lg font-bold disabled:opacity-40 disabled:cursor-not-allowed"
                 :class="pos.isSelected(item) ? 'bg-white/20 text-white hover:bg-white/30' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'"
-                @click="pos.setQty(item, item.qty - 1)"
+                :disabled="item.sent"
+                :title="item.sent ? '已送廚不可改數量，請退菜' : ''"
+                @click="changeCartQty(item, item.qty - 1)"
               >−</button>
               <span
                 class="w-7 text-center font-bold"
                 :class="pos.isSelected(item) ? 'text-white' : 'text-gray-900'"
               >{{ item.qty }}</span>
               <button
-                class="w-7 h-7 rounded-lg font-bold"
+                class="w-7 h-7 rounded-lg font-bold disabled:opacity-40 disabled:cursor-not-allowed"
                 :class="pos.isSelected(item) ? 'bg-white text-brand-600 hover:bg-brand-50' : 'bg-brand-100 text-brand-700 hover:bg-brand-200'"
-                @click="pos.setQty(item, item.qty + 1)"
+                :disabled="item.sent"
+                :title="item.sent ? '已送廚不可改數量，請退菜' : ''"
+                @click="changeCartQty(item, item.qty + 1)"
               >＋</button>
             </div>
             <div class="flex gap-2 text-xs">
@@ -1125,7 +1202,7 @@ const isPlatformPay = computed(() => isPlatformPayment(pos.paymentMethod) || pay
                   : 'text-gray-600 hover:text-red-600 disabled:text-gray-300'"
                 :disabled="item.sent && !auth.isManager"
                 :title="item.sent && !auth.isManager ? '已送廚的菜品需店長權限才能退菜' : ''"
-                @click="pos.removeItem(item)"
+                @click="removeCartItem(item)"
               >
                 退菜
               </button>
@@ -1312,11 +1389,22 @@ const isPlatformPay = computed(() => isPlatformPayment(pos.paymentMethod) || pay
         桌台 <b>{{ pos.tableNumber || '—' }}</b> 尚未下單，確定清台？購物車內容將清除，桌台恢復空閒。
       </p>
       <p v-else class="text-sm text-gray-600">
-        確定作廢訂單 <b>{{ pos.orderNo }}</b>（桌台 {{ pos.tableNumber }}）？作廢後桌台將轉為待清，此操作無法復原。
+        確定作廢訂單 <b>{{ pos.orderNo }}</b>（桌台 {{ pos.tableNumber }}）？作廢後桌台將恢復空閒，此操作無法復原。
       </p>
       <template #footer>
         <button class="btn-ghost" @click="voidModal = false">取消</button>
         <button class="btn-danger" @click="voidOrder">{{ isDraftOrder ? '確定清台' : '確定作廢' }}</button>
+      </template>
+    </Modal>
+
+    <!-- ============ 退菜確認（已送廚） ============ -->
+    <Modal v-model="removeModal" title="退菜確認" width="max-w-sm">
+      <p class="text-sm text-gray-600">
+        「<b>{{ removeTarget?.name }}</b>」已送廚，確定退菜？
+      </p>
+      <template #footer>
+        <button class="btn-ghost" @click="removeModal = false; removeTarget = null">取消</button>
+        <button class="btn-danger" @click="confirmRemoveItem()">確定退菜</button>
       </template>
     </Modal>
 
@@ -1536,174 +1624,73 @@ const isPlatformPay = computed(() => isPlatformPayment(pos.paymentMethod) || pay
       <template #footer>
         <button class="btn-ghost" @click="cashPayModal = false">取消</button>
         <button class="btn-primary" :disabled="Number(pos.received) < pos.total" @click="confirmCashPay">
-          確認收款 {{ fmtMoney(pos.received || 0, catalog.currency) }}
+          下一步：確認小票
         </button>
       </template>
     </Modal>
 
-    <!-- ============ 日結 ============ -->
-    <Modal v-model="dayEndModal" title="日結" width="max-w-md">
-      <div v-if="dayEndSummary" class="space-y-3">
-        <div class="bg-gray-50 rounded-xl px-4 py-3 text-sm space-y-1.5">
-          <div class="flex justify-between">
-            <span class="text-gray-500">營業日</span>
-            <span class="font-extrabold">{{ dayEndSummary.business_date }}</span>
+    <DayEndModal ref="dayEndModalRef" @done="router.push('/tables')" />
+
+    <!-- ============ 結賬確認（小票預覽，確認後才收款） ============ -->
+    <Modal v-model="checkoutPreview" title="確認結賬" width="max-w-sm">
+      <div class="flex gap-2 mb-3">
+        <button class="btn btn-sm flex-1" :class="receiptTab === 'customer' ? 'bg-brand-500 text-white' : 'bg-gray-100 text-gray-600'" @click="receiptTab = 'customer'">顧客收銀單</button>
+        <button class="btn btn-sm flex-1" :class="receiptTab === 'kitchen' ? 'bg-brand-500 text-white' : 'bg-gray-100 text-gray-600'" @click="receiptTab = 'kitchen'">廚房單（後廚/水吧）</button>
+      </div>
+
+      <div v-if="receiptTab === 'customer'">
+        <div class="text-center space-y-1 pb-3 border-b border-dashed border-gray-200">
+          <div class="font-extrabold text-lg">{{ catalog.settings.store_name }}</div>
+          <div class="text-xs text-gray-400">
+            <template v-if="pos.orderNo">{{ pos.orderNo }} · </template>預覽
           </div>
-          <div class="flex justify-between">
-            <span class="text-gray-500">開市時間</span>
-            <span class="font-bold">{{ dayEndSummary.start_time }}</span>
-          </div>
-          <div class="flex justify-between border-t border-gray-200 pt-1.5">
-            <span class="text-gray-500">訂單數</span>
-            <span class="font-bold">{{ dayEndSummary.order_count }}</span>
-          </div>
-          <div class="flex justify-between">
-            <span class="text-gray-500">總營業額</span>
-            <span class="font-extrabold text-brand-600 text-lg">{{ fmtMoney(dayEndSummary.total_sales, catalog.currency) }}</span>
+          <div v-if="pos.tableNumber" class="text-xs text-gray-400">
+            桌台 {{ pos.tableNumber }}<template v-if="pos.guestCount > 0"> · {{ pos.guestCount }}人</template>
           </div>
         </div>
-
-        <div>
-          <div class="text-xs font-bold text-gray-400 mb-2">按支付方式</div>
-          <div class="space-y-1.5">
-            <div
-              v-for="p in dayEndSummary.by_payment"
-              :key="p.payment_method"
-              class="flex items-center justify-between rounded-lg border border-gray-100 px-3 py-2 text-sm"
-            >
-              <span class="font-bold">{{ payLabel(p.payment_method) }}
-                <span class="text-gray-400 font-normal text-xs ml-1">×{{ p.order_count }}</span>
-              </span>
-              <span class="font-extrabold">{{ fmtMoney(p.amount, catalog.currency) }}</span>
+        <div class="py-3 space-y-2 text-sm border-b border-dashed border-gray-200 max-h-56 overflow-y-auto">
+          <div v-for="it in pos.items" :key="it.id">
+            <div class="flex justify-between">
+              <span class="truncate mr-2">{{ it.name }}<span v-if="it.spec">[{{ it.spec }}]</span> ×{{ it.qty }}</span>
+              <span class="shrink-0">{{ fmtMoney(it.price * it.qty, catalog.currency) }}</span>
             </div>
-            <div v-if="!(dayEndSummary.by_payment || []).length" class="text-center text-gray-300 py-4 text-sm">
-              本日尚無已結帳訂單
-            </div>
+            <div v-for="(line, i) in optionLines(it)" :key="i" class="text-xs text-gray-400 pl-2">{{ line }}</div>
+            <div v-if="drinkSaving(it)" class="text-xs text-emerald-500 pl-2">飲品時段優惠：原價 {{ fmtMoney(drinkSaving(it).base, catalog.currency) }}，優惠 −{{ fmtMoney(drinkSaving(it).saved, catalog.currency) }}</div>
           </div>
         </div>
-
-        <div class="rounded-xl border border-gray-200 p-3 space-y-2">
-          <div class="text-xs font-bold text-gray-400">錢箱對帳</div>
-          <div class="flex justify-between text-sm">
-            <span class="text-gray-500">開市現金</span>
-            <span class="font-bold">{{ fmtMoney(dayEndSummary.opening_cash, catalog.currency) }}</span>
-          </div>
-          <div class="flex justify-between text-sm">
-            <span class="text-gray-500">現金收款</span>
-            <span class="font-bold">{{ fmtMoney(dayEndSummary.cash_amount, catalog.currency) }}</span>
-          </div>
-          <div class="flex justify-between text-sm border-t border-gray-100 pt-1.5">
-            <span class="text-gray-500">應有現金</span>
-            <span class="font-extrabold text-brand-700">{{ fmtMoney(dayEndExpectedCash, catalog.currency) }}</span>
-          </div>
-
-          <div
-            class="rounded-xl bg-white border-2 px-3 py-2 flex items-center justify-between gap-2"
-            :class="dayEndCashMatch === null
-              ? 'border-brand-200'
-              : dayEndCashMatch
-                ? 'border-emerald-400'
-                : 'border-red-400'"
-          >
-            <span class="text-xs text-gray-400 shrink-0">實點現金</span>
-            <div class="flex items-center gap-2 min-w-0">
-              <span class="font-extrabold text-2xl tabular-nums truncate"
-                :class="dayEndCashMatch === null
-                  ? 'text-brand-700'
-                  : dayEndCashMatch
-                    ? 'text-emerald-700'
-                    : 'text-red-600'"
-              >
-                {{ fmtMoney(dayEndCountedCash, catalog.currency) }}
-              </span>
-              <span
-                v-if="dayEndCashMatch !== null"
-                class="text-xl font-extrabold shrink-0"
-                :class="dayEndCashMatch ? 'text-emerald-600' : 'text-red-500'"
-                :title="dayEndCashMatch ? '與應有現金相符' : '與應有現金不符'"
-              >
-                {{ dayEndCashMatch ? '✓' : '✗' }}
-              </span>
-            </div>
-          </div>
-
-          <div class="grid grid-cols-3 gap-2">
-            <button
-              v-for="key in NUM_PAD_KEYS"
-              :key="`dayend-${key}`"
-              type="button"
-              class="h-12 rounded-xl border-2 border-gray-200 font-extrabold text-lg transition active:scale-95 hover:border-brand-300 hover:bg-brand-50"
-              :class="key === 'C' || key === '⌫' ? 'text-gray-500' : 'text-gray-800'"
-              @click="onDayEndCashNumPad(key)"
-            >
-              {{ key }}
-            </button>
+        <div class="py-3 space-y-1.5 text-sm">
+          <div class="flex justify-between text-gray-500"><span>小計</span><span>{{ fmtMoney(pos.subtotal, catalog.currency) }}</span></div>
+          <div v-if="pos.discount" class="flex justify-between text-gray-500"><span>折扣</span><span>−{{ fmtMoney(pos.discount, catalog.currency) }}</span></div>
+          <div v-if="pos.serviceFee" class="flex justify-between text-gray-500"><span>服務費</span><span>{{ fmtMoney(pos.serviceFee, catalog.currency) }}</span></div>
+          <div class="flex justify-between font-extrabold"><span>實收</span><span class="text-brand-600">{{ fmtMoney(pos.total, catalog.currency) }}</span></div>
+          <div class="flex justify-between text-gray-500"><span>支付方式</span><span>{{ paymentMeta(pos.paymentMethod).label }}</span></div>
+          <div v-if="pos.paymentMethod === 'cash'" class="flex justify-between text-gray-500">
+            <span>收現 / 找零</span>
+            <span>{{ fmtMoney(pos.received, catalog.currency) }} / {{ fmtMoney(pos.change, catalog.currency) }}</span>
           </div>
         </div>
+        <div class="text-center text-xs text-gray-400 pt-2 border-t border-dashed border-gray-200">
+          {{ catalog.settings.receipt_footer }}
+        </div>
+      </div>
 
-        <p class="text-xs text-gray-400">確認日結後將關閉本日營業日，需重新開市才能繼續收銀。</p>
+      <div v-else>
+        <div class="text-center space-y-1 pb-3 border-b border-dashed border-gray-200">
+          <div class="font-extrabold">【廚房單】</div>
+          <div class="text-xs text-gray-400">
+            <template v-if="pos.orderNo">{{ pos.orderNo }} · </template>
+            <template v-if="pos.tableNumber">桌台 {{ pos.tableNumber }} · </template>
+            預覽
+          </div>
+        </div>
+        <pre class="py-3 text-sm font-mono whitespace-pre-wrap leading-relaxed border-b border-dashed border-gray-200">{{ previewKitchenText }}</pre>
+        <p class="text-xs text-gray-400 pt-2">確認後才會正式結賬收款。</p>
       </div>
       <template #footer>
-        <button class="btn-ghost" :disabled="dayEnding" @click="dayEndModal = false">取消</button>
-        <button class="btn-danger" :disabled="dayEnding || !dayEndCashDigits.length" @click="confirmDayEnd">
-          {{ dayEnding ? '日結中…' : '確認日結' }}
+        <button class="btn-ghost" :disabled="checkingOut" @click="checkoutPreview = false">取消</button>
+        <button class="btn-primary" :disabled="checkingOut" @click="confirmCheckout">
+          {{ checkingOut ? '結賬中…' : `確認結賬 ${fmtMoney(pos.total, catalog.currency)}` }}
         </button>
-      </template>
-    </Modal>
-
-    <!-- ============ 結帳小票（顧客收銀單 / 廚房單） ============ -->
-    <Modal v-model="receipt" title="結帳完成" width="max-w-sm">
-      <template v-if="receipt">
-        <div class="flex gap-2 mb-3">
-          <button class="btn btn-sm flex-1" :class="receiptTab === 'customer' ? 'bg-brand-500 text-white' : 'bg-gray-100 text-gray-600'" @click="receiptTab = 'customer'">顧客收銀單</button>
-          <button class="btn btn-sm flex-1" :class="receiptTab === 'kitchen' ? 'bg-brand-500 text-white' : 'bg-gray-100 text-gray-600'" @click="receiptTab = 'kitchen'">廚房單（後廚/水吧）</button>
-        </div>
-
-        <!-- 顧客收銀單 -->
-        <div v-if="receiptTab === 'customer'">
-          <div class="text-center space-y-1 pb-3 border-b border-dashed border-gray-200">
-            <div class="font-extrabold text-lg">{{ catalog.settings.store_name }}</div>
-            <div class="text-xs text-gray-400">{{ receipt.order_no }} · {{ receipt.created_at }}</div>
-            <div v-if="receipt.table_number" class="text-xs text-gray-400">桌台 {{ receipt.table_number }}</div>
-          </div>
-          <div class="py-3 space-y-2 text-sm border-b border-dashed border-gray-200">
-            <div v-for="it in receipt.items" :key="it.id">
-              <div class="flex justify-between">
-                <span class="truncate mr-2">{{ it.product_name }}<span v-if="it.spec">[{{ it.spec }}]</span> ×{{ it.quantity }}</span>
-                <span class="shrink-0">{{ fmtMoney(it.price * it.quantity, catalog.currency) }}</span>
-              </div>
-              <div v-for="(line, i) in optionLines(it)" :key="i" class="text-xs text-gray-400 pl-2">{{ line }}</div>
-              <div v-if="drinkSaving(it)" class="text-xs text-emerald-500 pl-2">飲品時段優惠：原價 {{ fmtMoney(drinkSaving(it).base, catalog.currency) }}，優惠 −{{ fmtMoney(drinkSaving(it).saved, catalog.currency) }}</div>
-            </div>
-          </div>
-          <div class="py-3 space-y-1.5 text-sm">
-            <div class="flex justify-between text-gray-500"><span>小計</span><span>{{ fmtMoney(receipt.total_amount, catalog.currency) }}</span></div>
-            <div v-if="receipt.discount_amount" class="flex justify-between text-gray-500"><span>折扣</span><span>−{{ fmtMoney(receipt.discount_amount, catalog.currency) }}</span></div>
-            <div v-if="receipt.service_fee" class="flex justify-between text-gray-500"><span>服務費</span><span>{{ fmtMoney(receipt.service_fee, catalog.currency) }}</span></div>
-            <div class="flex justify-between font-extrabold"><span>實收</span><span class="text-brand-600">{{ fmtMoney(receipt.pay_amount, catalog.currency) }}</span></div>
-            <div class="flex justify-between text-gray-500"><span>支付方式</span><span>{{ paymentMeta(receipt.payment_method).label }}</span></div>
-            <div v-if="receipt.payment_method === 'cash'" class="flex justify-between text-gray-500">
-              <span>收現 / 找零</span>
-              <span>{{ fmtMoney(receipt.received_amount, catalog.currency) }} / {{ fmtMoney(receipt.change_amount, catalog.currency) }}</span>
-            </div>
-          </div>
-          <div class="text-center text-xs text-gray-400 pt-2 border-t border-dashed border-gray-200">
-            {{ catalog.settings.receipt_footer }}
-          </div>
-        </div>
-
-        <!-- 廚房單 -->
-        <div v-else>
-          <div class="text-center space-y-1 pb-3 border-b border-dashed border-gray-200">
-            <div class="font-extrabold">【廚房單】</div>
-            <div class="text-xs text-gray-400">{{ receipt.order_no }}<span v-if="receipt.table_number"> · 桌台 {{ receipt.table_number }}</span> · {{ receipt.created_at }}</div>
-          </div>
-          <pre class="py-3 text-sm font-mono whitespace-pre-wrap leading-relaxed border-b border-dashed border-gray-200">{{ kitchenText }}</pre>
-          <p class="text-xs text-gray-400 pt-2">實際硬體列印需在桌面殼（Tauri/Electron）接入 ESC/POS 印表機；此處為列印內容預覽。</p>
-        </div>
-      </template>
-      <template #footer>
-        <button class="btn-primary" @click="afterReceipt">完成</button>
       </template>
     </Modal>
 

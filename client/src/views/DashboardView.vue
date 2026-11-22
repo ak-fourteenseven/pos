@@ -236,9 +236,9 @@ function logout() {
         若需繼續收銀，可撤銷日結並重新開啟本日。
       </p>
       <template #footer>
-        <button class="btn-ghost" :disabled="reopening" @click="closedTodayModal = false">Back</button>
+        <button class="btn-ghost" :disabled="reopening" @click="closedTodayModal = false">返回</button>
         <button class="btn-primary" :disabled="reopening" @click="voidDayEnd">
-          {{ reopening ? '處理中…' : 'Void Day End' }}
+          {{ reopening ? '處理中…' : '撤銷日結' }}
         </button>
       </template>
     </Modal>

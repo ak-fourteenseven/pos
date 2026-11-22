@@ -47,7 +47,6 @@ export const TABLE_STATUS = {
   available: { label: '空閒', cls: 'bg-emerald-100 text-emerald-700 border-emerald-300', dot: 'bg-emerald-500' },
   occupied: { label: '點餐中', cls: 'bg-brand-100 text-brand-700 border-brand-300', dot: 'bg-brand-500' },
   preparing: { label: '製作中', cls: 'bg-amber-100 text-amber-700 border-amber-300', dot: 'bg-amber-500' },
-  cleaning: { label: '待清', cls: 'bg-sky-100 text-sky-700 border-sky-300', dot: 'bg-sky-500' },
   reserved: { label: '已預訂', cls: 'bg-violet-100 text-violet-700 border-violet-300', dot: 'bg-violet-500' },
 };
 

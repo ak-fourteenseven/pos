@@ -95,11 +95,13 @@ async function api(p, method = 'GET', body, role = 'manager', uid = 1) {
   check('C1 店長進入後台報表', page.url().includes('/admin/reports'));
   const adminNav = await navText();
   check('C2 後台導航含報表與各設定', adminNav.includes('報表統計') && adminNav.includes('菜品管理')
-    && adminNav.includes('桌台管理') && adminNav.includes('支付方式') && adminNav.includes('員工管理') && adminNav.includes('系統設定'));
+    && adminNav.includes('菜品分類') && adminNav.includes('桌台管理') && adminNav.includes('支付方式')
+    && adminNav.includes('員工管理') && adminNav.includes('系統設定'));
   check('C3 報表頁顯示營業額', (await bodyText()).includes('總營業額'));
 
   const pages = [
     ['菜品管理', '/admin/products', '菜品'],
+    ['菜品分類', '/admin/categories', '分類'],
     ['桌台管理', '/admin/tables', '桌台'],
     ['支付方式', '/admin/payments', '支付'],
     ['員工管理', '/admin/staff', '員工'],

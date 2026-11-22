@@ -74,11 +74,19 @@ export const usePosStore = defineStore('pos', {
       const id = typeof itemOrId === 'object' ? itemOrId.id : itemOrId;
       this.selectedItemId = id;
     },
-    /** 若選中 id 已不在 items 中則清除（寬鬆比對，避免 number/string 不一致） */
+    /** 選中購物車最後一列（空車則清除） */
+    selectLastItem() {
+      const last = this.items[this.items.length - 1];
+      this.selectedItemId = last ? last.id : null;
+    },
+    /** 若選中 id 已不在 items 中則改選最後一列（寬鬆比對，避免 number/string 不一致） */
     syncSelection() {
-      if (this.selectedItemId == null) return;
+      if (this.selectedItemId == null) {
+        this.selectLastItem();
+        return;
+      }
       if (!this.items.some((it) => String(it.id) === String(this.selectedItemId))) {
-        this.selectedItemId = null;
+        this.selectLastItem();
       }
     },
     isSelected(itemOrId) {
@@ -94,15 +102,22 @@ export const usePosStore = defineStore('pos', {
       this.paymentMethod = platform || 'cash';
       if (platform) this.received = 0;
     },
-    /** 開台後綁定服務端訂單 */
+    /** 開台後綁定服務端訂單；人數未設時回退桌台容納人數 */
     bindOrder(order, tableNumber) {
       this.reset();
       this.orderId = order.id;
       this.orderNo = order.order_no || '';
       this.tableId = order.table_id;
       this.tableNumber = tableNumber || '';
-      this.guestCount = Math.max(0, Number(order.guest_count) || 0);
+      const guests = Math.max(0, Number(order.guest_count) || 0);
+      if (guests > 0) {
+        this.guestCount = guests;
+      } else {
+        const t = useCatalogStore().tables.find((x) => Number(x.id) === Number(order.table_id));
+        this.guestCount = Math.max(0, Number(t?.capacity) || 0);
+      }
       this.items = (order.items || []).map((it) => this.mapItem(it));
+      this.selectLastItem();
       this.applyPaymentForTable(order.table_id);
     },
     /** 改桌台用餐人數 */
@@ -248,7 +263,7 @@ export const usePosStore = defineStore('pos', {
         await api.del(`/orders/${this.orderId}/items/${item.id}`);
       }
       this.items = this.items.filter((i) => i.id !== item.id);
-      if (String(this.selectedItemId) === String(item.id)) this.selectedItemId = null;
+      this.selectLastItem();
     },
     clearItems() {
       this.items = [];
@@ -303,7 +318,7 @@ export const usePosStore = defineStore('pos', {
         this.orderNo = created.order_no || '';
         if (created.items && created.items.length) {
           this.items = created.items.map((it) => this.mapItem(it));
-          this.syncSelection();
+          this.selectLastItem();
         }
       }
       const res = await api.post(`/orders/${orderId}/submit`);
@@ -314,7 +329,7 @@ export const usePosStore = defineStore('pos', {
         if (full.order_no) this.orderNo = full.order_no;
         if (full.items) {
           this.items = full.items.map((it) => this.mapItem(it));
-          this.syncSelection();
+          this.selectLastItem();
         }
       }
       return res;
@@ -374,7 +389,7 @@ export const usePosStore = defineStore('pos', {
         table_id: tableId,
       });
       this.items = res.original.items.map((it) => this.mapItem(it));
-      this.syncSelection();
+      this.selectLastItem();
       return res.new_order;
     },
   },

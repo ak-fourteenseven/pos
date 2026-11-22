@@ -13,50 +13,11 @@ const keyword = ref('');
 const filterCat = ref(0); // 0 = 全部
 const showAll = ref(true);
 
-/* ---------------- 分類 ---------------- */
-const catModal = ref(false);
-const catForm = ref({ id: null, name: '', sort_order: 0 });
-
-function openCat(cat = null) {
-  catForm.value = cat
-    ? { id: cat.id, name: cat.name, sort_order: cat.sort_order }
-    : { id: null, name: '', sort_order: catalog.categories.length + 1 };
-  catModal.value = true;
-}
-async function saveCat() {
-  if (!catForm.value.name.trim()) {
-    toast.error('請輸入分類名稱');
-    return;
-  }
-  try {
-    if (catForm.value.id) {
-      await api.put(`/categories/${catForm.value.id}`, catForm.value);
-    } else {
-      await api.post('/categories', catForm.value);
-    }
-    catModal.value = false;
-    await catalog.loadAll();
-    toast.success('分類已儲存');
-  } catch (e) {
-    toast.error(e.message);
-  }
-}
-async function deleteCat(cat) {
-  if (!confirm(`確定刪除分類「${cat.name}」？該分類下菜品將全部下架。`)) return;
-  try {
-    await api.del(`/categories/${cat.id}`);
-    await catalog.loadAll();
-    toast.success('分類已刪除');
-  } catch (e) {
-    toast.error(e.message);
-  }
-}
-
 /* ---------------- 菜品 ---------------- */
 const prodModal = ref(false);
 const prodForm = ref({
   id: null, category_id: 0, name: '', price: '', barcode: '',
-  emoji: '🍽️', color: '#f59e0b', specs: [], is_available: 1,
+  emoji: '🍽️', color: '#f59e0b', specs: [], is_available: true,
 });
 
 function openProduct(p = null) {
@@ -70,13 +31,13 @@ function openProduct(p = null) {
         emoji: p.emoji || '🍽️',
         color: p.color || '#f59e0b',
         specs: catalog.parseSpecs(p),
-        is_available: Number(p.is_available),
+        is_available: Number(p.is_available) === 1,
       }
     : {
         id: null,
         category_id: catalog.categories[0]?.id || 0,
         name: '', price: '', barcode: '',
-        emoji: '🍽️', color: '#f59e0b', specs: [], is_available: 1,
+        emoji: '🍽️', color: '#f59e0b', specs: [], is_available: true,
       };
   prodModal.value = true;
 }
@@ -151,109 +112,64 @@ onMounted(async () => {
 
 <template>
   <div class="h-full overflow-y-auto p-5">
-    <div class="flex gap-5 h-full">
-      <!-- 左：分類 -->
-      <div class="w-56 shrink-0">
-        <div class="card p-4">
-          <div class="flex items-center justify-between mb-3">
-            <h3 class="font-extrabold">菜品分類</h3>
-            <button class="btn-primary btn-sm" @click="openCat()">＋ 新增</button>
-          </div>
-          <ul class="space-y-1">
-            <li
-              v-for="c in catalog.categories"
-              :key="c.id"
-              class="flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-bold cursor-pointer"
-              :class="filterCat === c.id ? 'bg-brand-50 text-brand-700' : 'hover:bg-gray-50'"
-              @click="filterCat = filterCat === c.id ? 0 : c.id"
-            >
-              <span class="flex-1 truncate">{{ c.name }}</span>
-              <span class="text-xs text-gray-400">{{ c.product_count }}</span>
-              <button class="text-gray-300 hover:text-brand-500" title="編輯" @click.stop="openCat(c)">✎</button>
-              <button class="text-gray-300 hover:text-red-500" title="刪除" @click.stop="deleteCat(c)">✕</button>
-            </li>
-          </ul>
-        </div>
-      </div>
-
-      <!-- 右：菜品列表 -->
-      <div class="flex-1 min-w-0 flex flex-col">
-        <div class="flex items-center gap-2 mb-3 flex-wrap">
-          <input v-model="keyword" class="input !w-56" placeholder="搜尋名稱 / 條碼…" />
-          <label class="flex items-center gap-1.5 text-sm text-gray-500 cursor-pointer">
-            <input v-model="showAll" type="checkbox" class="accent-brand-500" />顯示已下架
-          </label>
-          <div class="flex-1" />
-          <button class="btn-primary" @click="openProduct()">＋ 新增菜品</button>
-        </div>
-
-        <div class="card overflow-x-auto">
-          <table class="w-full text-sm">
-            <thead>
-              <tr class="text-left text-xs text-gray-400 border-b bg-gray-50">
-                <th class="py-2.5 px-4">菜品</th>
-                <th class="py-2.5 px-4">分類</th>
-                <th class="py-2.5 px-4">價格</th>
-                <th class="py-2.5 px-4">規格</th>
-                <th class="py-2.5 px-4">條碼</th>
-                <th class="py-2.5 px-4 text-center">狀態</th>
-                <th class="py-2.5 px-4 text-right">操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="p in products" :key="p.id" class="border-b border-gray-50 hover:bg-gray-50">
-                <td class="py-2.5 px-4">
-                  <div class="flex items-center gap-2">
-                    <span class="text-xl">{{ p.emoji }}</span>
-                    <span class="font-bold">{{ p.name }}</span>
-                  </div>
-                </td>
-                <td class="py-2.5 px-4 text-gray-500">{{ p.category_name || '未分類' }}</td>
-                <td class="py-2.5 px-4 font-bold text-brand-600">{{ fmtMoney(p.price, catalog.currency) }}</td>
-                <td class="py-2.5 px-4 text-gray-400 text-xs">
-                  {{ catalog.parseSpecs(p).map((s) => s.name).join(' / ') || '—' }}
-                </td>
-                <td class="py-2.5 px-4 text-gray-400 text-xs">{{ p.barcode || '—' }}</td>
-                <td class="py-2.5 px-4 text-center">
-                  <button
-                    class="chip"
-                    :class="Number(p.is_available) === 1 ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-100 text-gray-400'"
-                    @click="toggleAvailable(p)"
-                  >
-                    {{ Number(p.is_available) === 1 ? '上架中' : '已下架' }}
-                  </button>
-                </td>
-                <td class="py-2.5 px-4 text-right whitespace-nowrap">
-                  <button class="btn-ghost btn-sm" @click="openProduct(p)">編輯</button>
-                  <button class="btn-ghost btn-sm !text-red-500 ml-1" @click="deleteProduct(p)">刪除</button>
-                </td>
-              </tr>
-              <tr v-if="!products.length">
-                <td colspan="7" class="py-10 text-center text-gray-300">沒有符合的菜品</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
+    <div class="flex items-center gap-2 mb-3 flex-wrap">
+      <select v-model="filterCat" class="input !w-40">
+        <option :value="0">全部分類</option>
+        <option v-for="c in catalog.categories" :key="c.id" :value="c.id">{{ c.name }}</option>
+      </select>
+      <input v-model="keyword" class="input !w-56" placeholder="搜尋名稱 / 條碼…" />
+      <label class="flex items-center gap-1.5 text-sm text-gray-500 cursor-pointer">
+        <input v-model="showAll" type="checkbox" class="accent-brand-500" />顯示已下架
+      </label>
+      <div class="flex-1" />
+      <button class="btn-primary" @click="openProduct()">＋ 新增菜品</button>
     </div>
 
-    <!-- 分類彈窗 -->
-    <Modal v-model="catModal" title="分類" width="max-w-sm">
-      <div class="space-y-4">
-        <div>
-          <label class="label">分類名稱</label>
-          <input v-model="catForm.name" class="input" placeholder="例如：飲品" />
-        </div>
-        <div>
-          <label class="label">排序（數字越小越前面）</label>
-          <input v-model.number="catForm.sort_order" type="number" class="input" />
-        </div>
-      </div>
-      <template #footer>
-        <button class="btn-ghost" @click="catModal = false">取消</button>
-        <button class="btn-primary" @click="saveCat">儲存</button>
-      </template>
-    </Modal>
+    <div class="card overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="text-left text-xs text-gray-400 border-b bg-gray-50">
+            <th class="py-2.5 px-4">菜品</th>
+            <th class="py-2.5 px-4">分類</th>
+            <th class="py-2.5 px-4">價格</th>
+            <th class="py-2.5 px-4">規格</th>
+            <th class="py-2.5 px-4 text-center">狀態</th>
+            <th class="py-2.5 px-4 text-right">操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="p in products" :key="p.id" class="border-b border-gray-50 hover:bg-gray-50">
+            <td class="py-2.5 px-4">
+              <div class="flex items-center gap-2">
+                <span class="text-xl">{{ p.emoji }}</span>
+                <span class="font-bold">{{ p.name }}</span>
+              </div>
+            </td>
+            <td class="py-2.5 px-4 text-gray-500">{{ p.category_name || '未分類' }}</td>
+            <td class="py-2.5 px-4 font-bold text-brand-600">{{ fmtMoney(p.price, catalog.currency) }}</td>
+            <td class="py-2.5 px-4 text-gray-400 text-xs">
+              {{ catalog.parseSpecs(p).map((s) => s.name).join(' / ') || '—' }}
+            </td>
+            <td class="py-2.5 px-4 text-center">
+              <button
+                class="chip"
+                :class="Number(p.is_available) === 1 ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-100 text-gray-400'"
+                @click="toggleAvailable(p)"
+              >
+                {{ Number(p.is_available) === 1 ? '上架中' : '已下架' }}
+              </button>
+            </td>
+            <td class="py-2.5 px-4 text-right whitespace-nowrap">
+              <button class="btn-ghost btn-sm" @click="openProduct(p)">編輯</button>
+              <button class="btn-ghost btn-sm !text-red-500 ml-1" @click="deleteProduct(p)">刪除</button>
+            </td>
+          </tr>
+          <tr v-if="!products.length">
+            <td colspan="6" class="py-10 text-center text-gray-300">沒有符合的菜品</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
 
     <!-- 菜品彈窗 -->
     <Modal v-model="prodModal" :title="prodForm.id ? '編輯菜品' : '新增菜品'" width="max-w-xl">
