@@ -15,7 +15,7 @@ import KitchenTicketModal from '../components/KitchenTicketModal.vue';
 import {
   fmtMoney, hexA, PAYMENT_META, QUICK_REMARKS, isPlatformPayment, paymentForTableArea,
 } from '@shared/utils/format';
-import { currentSlot, modifiersSum, slotRuleText } from '@shared/utils/pricing';
+import { currentSlot, modifiersSum, slotRuleText, specNames } from '@shared/utils/pricing';
 
 const auth = useAuthStore();
 const catalog = useCatalogStore();
@@ -379,10 +379,12 @@ function optionLines(item) {
   if (o.spiciness) lines.push(`辣度: ${o.spiciness.name}`);
   if (o.filling) lines.push(`餡料: ${o.filling.name}`);
   if (o.flavor) lines.push(`口味: ${o.flavor.name}`);
+  if (o.specs && o.specs.length) lines.push(`規格: ${o.specs.map((t) => t.name).join('、')}`);
   if (o.toppings && o.toppings.length) lines.push(`加料: ${o.toppings.map((t) => t.name).join('、')}`);
   if (o.drink) {
     const t = o.drink.temperature === 'HOT' ? '熱' : '凍';
-    const prefs = o.drink.preferences && o.drink.preferences.length ? `, ${o.drink.preferences.join('、')}` : '';
+    const names = specNames(o.drink.preferences);
+    const prefs = names.length ? `, ${names.join('、')}` : '';
     const price = Number(o.drink.final_price) === 0 ? '免費' : fmtMoney(o.drink.final_price, catalog.currency);
     lines.push(`飲品: ${o.drink.name}(${t}${prefs}) ${price}`);
   }
@@ -399,29 +401,22 @@ function onDrinkAdd({ product, temperature, preferences, qty }) {
   drinkProduct.value = null;
 }
 
-function specDiff() {
-  const specs = catalog.parseSpecs(specForm.value.product);
-  const s = specs.find((x) => x.name === specForm.value.spec);
-  return s ? Number(s.diff || 0) : 0;
-}
-
 async function confirmSpec() {
-  const { product, qty, spec, remark, editing } = specForm.value;
+  const { product, qty, remark, editing } = specForm.value;
   if (editing) {
     await pos.updateItem(editing, { remark });
   } else {
-    await pos.addProduct(product, { spec, spec_diff: specDiff(), remark, qty });
+    await pos.addProduct(product, { remark, qty });
   }
   specModal.value = false;
 }
 
 function editItem(item) {
   const product = catalog.products.find((p) => p.id === item.product_id) || { name: item.name };
-  const specs = catalog.parseSpecs(product);
   specForm.value = {
     product,
     qty: item.qty,
-    spec: item.spec || (specs[0]?.name ?? ''),
+    spec: item.spec || '',
     remark: item.remark,
     editing: item,
   };
@@ -633,7 +628,8 @@ const previewKitchenText = computed(() => {
   const bar = [];
   const drinkLine = (qty, d) => {
     const t = d.temperature === 'HOT' ? '熱' : '凍';
-    const prefs = d.preferences && d.preferences.length ? `, ${d.preferences.join(', ')}` : '';
+    const names = specNames(d.preferences);
+    const prefs = names.length ? `, ${names.join(', ')}` : '';
     bar.push(`${qty}x ${d.name} (${t}${prefs})`);
   };
   for (const it of pos.items) {
@@ -648,6 +644,7 @@ const previewKitchenText = computed(() => {
       if (o.spiciness) food.push(`     辣度: ${o.spiciness.name}`);
       if (o.filling) food.push(`     餡料: ${o.filling.name}`);
       if (o.flavor) food.push(`     口味: ${o.flavor.name}`);
+      if (o.specs && o.specs.length) food.push(`     規格: ${o.specs.map((x) => x.name).join(', ')}`);
       if (o.toppings && o.toppings.length) food.push(`     加料: ${o.toppings.map((x) => x.name).join(', ')}`);
       if (o.drink) drinkLine(qty, o.drink);
     } else {
@@ -1258,27 +1255,9 @@ const isPlatformPay = computed(() => isPlatformPayment(pos.paymentMethod) || pay
       </div>
     </aside>
 
-    <!-- ============ 規格 / 備註彈窗 ============ -->
-    <Modal v-model="specModal" :title="specForm.editing ? `備註 · ${specForm.editing.name}` : `${specForm.product?.name ?? ''} · 規格選擇`">
+    <!-- ============ 備註彈窗 ============ -->
+    <Modal v-model="specModal" :title="specForm.editing ? `備註 · ${specForm.editing.name}` : `${specForm.product?.name ?? ''} · 備註`">
       <div v-if="specForm.product" class="space-y-5">
-        <div>
-          <div class="label">規格</div>
-          <div class="grid grid-cols-2 gap-2">
-            <button
-              v-for="s in catalog.parseSpecs(specForm.product)"
-              :key="s.name"
-              class="rounded-xl border-2 py-2.5 text-sm font-bold transition"
-              :class="specForm.spec === s.name ? 'border-brand-500 bg-brand-50 text-brand-700' : 'border-gray-200'"
-              @click="specForm.spec = s.name"
-            >
-              {{ s.name }}
-              <span class="text-xs font-normal text-gray-400 ml-1">
-                {{ s.diff > 0 ? '+' : '' }}{{ s.diff || '' }}{{ s.diff ? '元' : '' }}
-              </span>
-            </button>
-          </div>
-        </div>
-
         <div>
           <div class="label">備註（快捷標籤）</div>
           <div class="flex flex-wrap gap-2">
@@ -1295,7 +1274,7 @@ const isPlatformPay = computed(() => isPlatformPayment(pos.paymentMethod) || pay
           <input v-model="specForm.remark" class="input mt-2" placeholder="自訂備註…" />
         </div>
 
-        <div class="flex items-center justify-between">
+        <div v-if="!specForm.editing" class="flex items-center justify-between">
           <div class="label !mb-0">數量</div>
           <div class="flex items-center gap-3">
             <button class="w-9 h-9 rounded-lg bg-gray-100 font-bold" @click="specForm.qty = Math.max(1, specForm.qty - 1)">−</button>
@@ -1304,10 +1283,10 @@ const isPlatformPay = computed(() => isPlatformPayment(pos.paymentMethod) || pay
           </div>
         </div>
 
-        <div class="flex justify-between items-center bg-gray-50 rounded-xl px-4 py-3">
+        <div v-if="!specForm.editing" class="flex justify-between items-center bg-gray-50 rounded-xl px-4 py-3">
           <span class="text-sm text-gray-500">小計</span>
           <span class="font-extrabold text-brand-600 text-lg">
-            {{ fmtMoney((Number(specForm.product.price) + specDiff()) * specForm.qty, catalog.currency) }}
+            {{ fmtMoney(Number(specForm.product.price) * specForm.qty, catalog.currency) }}
           </span>
         </div>
       </div>

@@ -1,7 +1,7 @@
 <script setup>
 import { computed, ref, watch } from 'vue';
 import Modal from '@shared/components/Modal.vue';
-import { DRINK_PREFS, drinkPrice, slotRuleText } from '@shared/utils/pricing';
+import { DRINK_PREFS, drinkPrice, normalizeSpecEntries, slotRuleText, specPriceSum } from '@shared/utils/pricing';
 import { fmtMoney } from '@shared/utils/format';
 
 const props = defineProps({
@@ -23,6 +23,12 @@ const temperature = ref('HOT');
 const preferences = ref([]);
 const qty = ref(1);
 
+const prefOptions = computed(() => {
+  const list = normalizeSpecEntries(props.product?.resolved_specs || []);
+  if (list.length) return list;
+  return DRINK_PREFS.map((name) => ({ name, price_diff: 0 }));
+});
+
 watch(() => props.modelValue, (open) => {
   if (!open) return;
   temperature.value = 'HOT';
@@ -30,17 +36,35 @@ watch(() => props.modelValue, (open) => {
   qty.value = 1;
 });
 
-const calc = computed(() => (props.product ? drinkPrice(props.product.price, temperature.value, props.slot) : null));
+const calc = computed(() => {
+  if (!props.product) return null;
+  const base = drinkPrice(props.product.price, temperature.value, props.slot);
+  const prefExtra = base.price === 0 ? 0 : specPriceSum(preferences.value);
+  return { ...base, price: base.price + prefExtra };
+});
 
 function togglePref(tag) {
-  const idx = preferences.value.indexOf(tag);
+  const key = tag.id ?? tag.name;
+  const idx = preferences.value.findIndex((x) => (x.id ?? x.name) === key);
   if (idx >= 0) preferences.value.splice(idx, 1);
-  else preferences.value.push(tag);
+  else preferences.value.push({ id: tag.id, name: tag.name, price_diff: Number(tag.price_diff) || 0 });
+}
+function isPrefSelected(tag) {
+  const key = tag.id ?? tag.name;
+  return preferences.value.some((x) => (x.id ?? x.name) === key);
 }
 
 function confirmAdd() {
   if (!props.product) return;
-  emit('add', { product: props.product, temperature: temperature.value, preferences: [...preferences.value], qty: qty.value });
+  emit('add', {
+    product: props.product,
+    temperature: temperature.value,
+    preferences: preferences.value.map((x) => ({
+      name: x.name,
+      price_diff: Number(x.price_diff) || 0,
+    })),
+    qty: qty.value,
+  });
 }
 </script>
 
@@ -60,17 +84,21 @@ function confirmAdd() {
         </div>
       </div>
 
-      <div>
+      <div v-if="prefOptions.length">
         <div class="label">口味（選填）</div>
         <div class="flex flex-wrap gap-2">
           <button
-            v-for="tag in DRINK_PREFS"
-            :key="tag"
+            v-for="tag in prefOptions"
+            :key="tag.id || tag.name"
+            type="button"
             class="chip border transition"
-            :class="preferences.includes(tag) ? 'bg-brand-500 text-white border-brand-500' : 'bg-white text-gray-500 border-gray-300'"
+            :class="isPrefSelected(tag) ? 'bg-brand-500 text-white border-brand-500' : 'bg-white text-gray-500 border-gray-300'"
             @click="togglePref(tag)"
           >
-            {{ tag }}
+            {{ tag.name }}
+            <span v-if="Number(tag.price_diff)" class="text-[10px] ml-0.5">
+              {{ Number(tag.price_diff) > 0 ? '+' : '' }}{{ fmtMoney(tag.price_diff, currency) }}
+            </span>
           </button>
         </div>
       </div>

@@ -1,7 +1,7 @@
 <script setup>
 import { computed, ref, watch } from 'vue';
 import Modal from '@shared/components/Modal.vue';
-import { DRINK_PREFS, drinkPrice, slotRuleText } from '@shared/utils/pricing';
+import { DRINK_PREFS, drinkPrice, normalizeSpecEntries, slotRuleText, specPriceSum } from '@shared/utils/pricing';
 import { fmtMoney } from '@shared/utils/format';
 
 const props = defineProps({
@@ -22,7 +22,8 @@ function onClose() {
 
 const stepIdx = ref(0);
 const selections = ref({}); // groupCode -> { id, name, price_diff } | [{...}]
-const drink = ref(null); // { product_id, name, base_price, temperature, preferences }
+const selectedSpecs = ref([]); // [{ id, name, price_diff }]
+const drink = ref(null); // { product_id, name, base_price, temperature, preferences, resolved_specs }
 const qty = ref(1);
 
 const steps = computed(() => (props.product && props.product.steps) || []);
@@ -32,11 +33,24 @@ const visibleSteps = computed(() => steps.value.filter((s) => s.code !== skipCod
 const currentStep = computed(() => visibleSteps.value[stepIdx.value] || null);
 const isLast = computed(() => stepIdx.value >= visibleSteps.value.length - 1);
 
+/** 菜品生效規格（分類預設或覆寫） */
+const productSpecs = computed(() => normalizeSpecEntries(props.product?.resolved_specs || []));
+
+/** 規格區塊：辣度步驟同面板；無辣度時掛在第一個非飲品步驟 */
+const showSpecsOnStep = computed(() => {
+  if (!productSpecs.value.length || !currentStep.value || currentStep.value.code === 'drink') return false;
+  const spice = visibleSteps.value.find((s) => s.code === 'spiciness');
+  if (spice) return currentStep.value.code === 'spiciness';
+  const firstFood = visibleSteps.value.find((s) => s.code !== 'drink');
+  return firstFood && currentStep.value.code === firstFood.code;
+});
+
 /** 初始化：單選組預設選中 is_default 或第一項 */
 watch(() => props.modelValue, (open) => {
   if (!open || !props.product) return;
   stepIdx.value = 0;
   qty.value = 1;
+  selectedSpecs.value = [];
   const sel = {};
   for (const st of steps.value) {
     if (st.code === 'drink') continue;
@@ -68,26 +82,60 @@ function isSelected(group, item) {
   return v && v.id === item.id;
 }
 
+function toggleSpec(spec) {
+  const key = spec.id ?? spec.name;
+  const idx = selectedSpecs.value.findIndex((x) => (x.id ?? x.name) === key);
+  if (idx >= 0) selectedSpecs.value.splice(idx, 1);
+  else selectedSpecs.value.push({ id: spec.id, name: spec.name, price_diff: Number(spec.price_diff) || 0 });
+}
+function isSpecSelected(spec) {
+  const key = spec.id ?? spec.name;
+  return selectedSpecs.value.some((x) => (x.id ?? x.name) === key);
+}
+
 /** 選擇飲品（含凍/熱與口味） */
 function selectDrink(p) {
   if (drink.value && drink.value.product_id === p.id) {
     drink.value = null;
     return;
   }
-  drink.value = { product_id: p.id, name: p.name, base_price: Number(p.price), temperature: 'HOT', preferences: [] };
+  drink.value = {
+    product_id: p.id,
+    name: p.name,
+    base_price: Number(p.price),
+    temperature: 'HOT',
+    preferences: [],
+    resolved_specs: normalizeSpecEntries(p.resolved_specs || []),
+  };
 }
 function setTemp(t) {
   if (drink.value) drink.value.temperature = t;
 }
+function drinkPrefOptions() {
+  if (!drink.value) return [];
+  const list = drink.value.resolved_specs;
+  if (list.length) return list;
+  return DRINK_PREFS.map((name) => ({ name, price_diff: 0 }));
+}
 function togglePref(tag) {
   if (!drink.value) return;
-  const idx = drink.value.preferences.indexOf(tag);
+  const key = tag.id ?? tag.name;
+  const idx = drink.value.preferences.findIndex((x) => (x.id ?? x.name) === key);
   if (idx >= 0) drink.value.preferences.splice(idx, 1);
-  else drink.value.preferences.push(tag);
+  else drink.value.preferences.push({ id: tag.id, name: tag.name, price_diff: Number(tag.price_diff) || 0 });
+}
+function isPrefSelected(tag) {
+  if (!drink.value) return false;
+  const key = tag.id ?? tag.name;
+  return drink.value.preferences.some((x) => (x.id ?? x.name) === key);
 }
 
-const drinkCalc = computed(() =>
-  drink.value ? drinkPrice(drink.value.base_price, drink.value.temperature, props.slot) : null);
+const drinkCalc = computed(() => {
+  if (!drink.value) return null;
+  const base = drinkPrice(drink.value.base_price, drink.value.temperature, props.slot);
+  const prefExtra = base.price === 0 ? 0 : specPriceSum(drink.value.preferences);
+  return { ...base, price: base.price + prefExtra };
+});
 
 const modifiersSum = computed(() => {
   let sum = 0;
@@ -97,6 +145,7 @@ const modifiersSum = computed(() => {
     if (Array.isArray(v)) sum += v.reduce((s, x) => s + (x.price_diff || 0), 0);
     else if (v) sum += v.price_diff || 0;
   }
+  sum += specPriceSum(selectedSpecs.value);
   return sum;
 });
 
@@ -130,13 +179,22 @@ function confirmAdd() {
       options[key] = { name: v.name, price_diff: v.price_diff || 0 };
     }
   }
+  if (selectedSpecs.value.length) {
+    options.specs = selectedSpecs.value.map((x) => ({
+      name: x.name,
+      price_diff: Number(x.price_diff) || 0,
+    }));
+  }
   if (drink.value) {
     options.drink = {
       product_id: drink.value.product_id,
       name: drink.value.name,
       base_price: drink.value.base_price,
       temperature: drink.value.temperature,
-      preferences: [...drink.value.preferences],
+      preferences: drink.value.preferences.map((x) => ({
+        name: x.name,
+        price_diff: Number(x.price_diff) || 0,
+      })),
       final_price: drinkCalc.value ? drinkCalc.value.price : drink.value.base_price,
     };
   }
@@ -180,6 +238,29 @@ const stepLabel = computed(() => {
             </span>
           </button>
         </div>
+
+        <!-- 規格（選填）：辣度同面板 / 無辣度時掛第一個食品步驟 -->
+        <div v-if="showSpecsOnStep" class="mt-4">
+          <div class="flex items-center justify-between mb-2">
+            <span class="label !mb-0">規格</span>
+            <span class="text-xs text-gray-400">可多選 · 選填</span>
+          </div>
+          <div class="flex flex-wrap gap-1.5">
+            <button
+              v-for="s in productSpecs"
+              :key="s.id || s.name"
+              type="button"
+              class="chip border transition"
+              :class="isSpecSelected(s) ? 'bg-brand-500 text-white border-brand-500' : 'bg-white text-gray-500 border-gray-300'"
+              @click="toggleSpec(s)"
+            >
+              {{ s.name }}
+              <span v-if="Number(s.price_diff)" class="text-[10px] ml-0.5 opacity-90">
+                {{ Number(s.price_diff) > 0 ? '+' : '' }}{{ fmtMoney(s.price_diff, currency) }}
+              </span>
+            </button>
+          </div>
+        </div>
       </div>
 
       <!-- 飲品步驟 -->
@@ -193,7 +274,6 @@ const stepLabel = computed(() => {
             <button class="w-full flex items-center gap-2 text-left" @click="selectDrink(d)">
               <span class="text-xl">{{ d.emoji }}</span>
               <span class="font-bold flex-1">{{ d.name }}</span>
-              <span class="text-xs text-gray-400 line-through" v-if="false">{{ fmtMoney(d.price, currency) }}</span>
               <span class="text-sm font-bold text-gray-500">原價 {{ fmtMoney(d.price, currency) }}</span>
               <span v-if="drink && drink.product_id === d.id" class="chip bg-brand-500 text-white">已選</span>
             </button>
@@ -208,16 +288,23 @@ const stepLabel = computed(() => {
                   <span class="text-xs font-normal text-gray-400 ml-1">{{ drinkCalc ? drinkCalc.label : '' }}</span>
                 </span>
               </div>
-              <div class="flex flex-wrap gap-1.5">
-                <button
-                  v-for="tag in DRINK_PREFS"
-                  :key="tag"
-                  class="chip border transition"
-                  :class="drink.preferences.includes(tag) ? 'bg-brand-500 text-white border-brand-500' : 'bg-white text-gray-500 border-gray-300'"
-                  @click="togglePref(tag)"
-                >
-                  {{ tag }}
-                </button>
+              <div v-if="drinkPrefOptions().length">
+                <div class="text-xs font-bold text-gray-500 mb-1.5">口味（選填）</div>
+                <div class="flex flex-wrap gap-1.5">
+                  <button
+                    v-for="tag in drinkPrefOptions()"
+                    :key="tag.id || tag.name"
+                    type="button"
+                    class="chip border transition"
+                    :class="isPrefSelected(tag) ? 'bg-brand-500 text-white border-brand-500' : 'bg-white text-gray-500 border-gray-300'"
+                    @click="togglePref(tag)"
+                  >
+                    {{ tag.name }}
+                    <span v-if="Number(tag.price_diff)" class="text-[10px] ml-0.5">
+                      {{ Number(tag.price_diff) > 0 ? '+' : '' }}{{ fmtMoney(tag.price_diff, currency) }}
+                    </span>
+                  </button>
+                </div>
               </div>
             </div>
           </div>

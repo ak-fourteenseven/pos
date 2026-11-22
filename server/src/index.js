@@ -74,7 +74,8 @@ function buildKitchenTicket(order, items) {
   const bar = [];
   const drinkLine = (it, d) => {
     const t = d.temperature === 'HOT' ? '熱' : '凍';
-    const prefs = d.preferences && d.preferences.length ? `, ${d.preferences.join(', ')}` : '';
+    const names = prefsNames(d.preferences);
+    const prefs = names.length ? `, ${names.join(', ')}` : '';
     bar.push(`${it.quantity}x ${d.name} (${t}${prefs})`);
   };
   for (const it of items) {
@@ -90,6 +91,7 @@ function buildKitchenTicket(order, items) {
       if (o.spiciness) food.push(`     辣度: ${o.spiciness.name}`);
       if (o.filling) food.push(`     餡料: ${o.filling.name}`);
       if (o.flavor) food.push(`     口味: ${o.flavor.name}`);
+      if (o.specs && o.specs.length) food.push(`     規格: ${o.specs.map((x) => x.name).join(', ')}`);
       if (o.toppings && o.toppings.length) food.push(`     加料: ${o.toppings.map((x) => x.name).join(', ')}`);
       if (o.drink) drinkLine(it, o.drink); // 套餐內飲品同步給水吧
     } else {
@@ -138,6 +140,249 @@ function computeDrinkPrice(db, basePrice, temperature, now = new Date()) {
   }
   return { price: base, period: slot.name, periodCode: code, saved: 0 };
 }
+/** 規格列表：分類預設 or 菜品覆寫 */
+function listCategorySpecs(db, categoryId) {
+  if (!categoryId) return [];
+  return db.prepare(
+    'SELECT id, category_id, name, price_diff, sort_order FROM category_specs WHERE category_id = ? ORDER BY sort_order, id',
+  ).all(categoryId);
+}
+function listProductSpecs(db, productId) {
+  if (!productId) return [];
+  return db.prepare(
+    'SELECT id, product_id, name, price_diff, sort_order FROM product_specs WHERE product_id = ? ORDER BY sort_order, id',
+  ).all(productId);
+}
+/** 解析菜品生效規格（覆寫優先） */
+function resolveProductSpecs(db, product) {
+  if (!product) return [];
+  if (Number(product.use_custom_specs) === 1) return listProductSpecs(db, product.id);
+  return listCategorySpecs(db, product.category_id);
+}
+function attachProductSpecFields(db, product) {
+  const category_specs = listCategorySpecs(db, product.category_id);
+  const product_specs = listProductSpecs(db, product.id);
+  const use_custom_specs = Number(product.use_custom_specs) === 1 ? 1 : 0;
+  const resolved_specs = use_custom_specs ? product_specs : category_specs;
+  return { ...product, use_custom_specs, category_specs, product_specs, resolved_specs };
+}
+
+/** 分類／菜品選項組（含 items） */
+function listCategoryOptionGroups(db, categoryId) {
+  if (!categoryId) return [];
+  const groups = db.prepare(
+    'SELECT id, category_id, code, name, is_multi, required, sort_order FROM category_option_groups WHERE category_id = ? ORDER BY sort_order, id',
+  ).all(categoryId);
+  const itemsStmt = db.prepare(
+    'SELECT id, group_id, name, price_diff, is_default, sort_order FROM category_option_items WHERE group_id = ? ORDER BY sort_order, id',
+  );
+  return groups.map((g) => ({ ...g, items: itemsStmt.all(g.id) }));
+}
+function listProductOptionGroups(db, productId) {
+  if (!productId) return [];
+  const groups = db.prepare(
+    'SELECT id, product_id, code, name, is_multi, required, sort_order FROM product_option_groups WHERE product_id = ? ORDER BY sort_order, id',
+  ).all(productId);
+  const itemsStmt = db.prepare(
+    'SELECT id, group_id, name, price_diff, is_default, sort_order FROM product_option_items WHERE group_id = ? ORDER BY sort_order, id',
+  );
+  return groups.map((g) => ({ ...g, items: itemsStmt.all(g.id) }));
+}
+function resolveProductOptionGroups(db, product) {
+  if (!product) return [];
+  let groups = Number(product.use_custom_options) === 1
+    ? listProductOptionGroups(db, product.id)
+    : listCategoryOptionGroups(db, product.category_id);
+  const skip = product.skip_group ? String(product.skip_group) : '';
+  if (skip) groups = groups.filter((g) => g.code !== skip);
+  return groups;
+}
+function categoryHasOptionGroups(db, categoryId) {
+  if (!categoryId) return false;
+  const row = db.prepare('SELECT COUNT(*) AS n FROM category_option_groups WHERE category_id = ?').get(categoryId);
+  return Number(row?.n) > 0;
+}
+function buildStepsFromOptionGroups(groups, includeDrink) {
+  const steps = (groups || []).map((g, i) => ({
+    ...g,
+    step: i + 1,
+    required: Number(g.required) ? 1 : 0,
+    is_multi: Number(g.is_multi) ? 1 : 0,
+  }));
+  if (includeDrink) {
+    steps.push({
+      id: 0,
+      code: 'drink',
+      name: '選擇飲品（跟餐）',
+      is_multi: 0,
+      required: 0,
+      items: [],
+      step: steps.length + 1,
+    });
+  }
+  return steps;
+}
+function copyCategoryOptionsToProduct(db, product) {
+  db.prepare(
+    'DELETE FROM product_option_items WHERE group_id IN (SELECT id FROM product_option_groups WHERE product_id = ?)',
+  ).run(product.id);
+  db.prepare('DELETE FROM product_option_groups WHERE product_id = ?').run(product.id);
+  const groups = listCategoryOptionGroups(db, product.category_id);
+  const insG = db.prepare(
+    'INSERT INTO product_option_groups (product_id, code, name, is_multi, required, sort_order) VALUES (?, ?, ?, ?, ?, ?)',
+  );
+  const insI = db.prepare(
+    'INSERT INTO product_option_items (group_id, name, price_diff, is_default, sort_order) VALUES (?, ?, ?, ?, ?)',
+  );
+  for (const g of groups) {
+    const gid = Number(insG.run(
+      product.id, g.code, g.name, Number(g.is_multi) || 0, Number(g.required) ? 1 : 0, Number(g.sort_order) || 0,
+    ).lastInsertRowid);
+    for (const it of g.items || []) {
+      insI.run(gid, it.name, Number(it.price_diff) || 0, Number(it.is_default) ? 1 : 0, Number(it.sort_order) || 0);
+    }
+  }
+  db.prepare('UPDATE products SET use_custom_options = 1 WHERE id = ?').run(product.id);
+}
+
+/** Draft-then-commit: replace nested trees (delete-all + reinsert; client ids ignored) */
+function normalizeSpecRows(specs) {
+  if (!Array.isArray(specs)) return null;
+  const rows = [];
+  for (const s of specs) {
+    const name = String(s?.name || '').trim();
+    if (!name) throw new Error('規格名稱不可空白');
+    rows.push({ name, price_diff: Number(s?.price_diff) || 0 });
+  }
+  return rows;
+}
+function normalizeOptionGroupRows(groups) {
+  if (!Array.isArray(groups)) return null;
+  const rows = [];
+  for (const g of groups) {
+    const code = String(g?.code || '').trim();
+    const name = String(g?.name || '').trim();
+    if (!code || !name) throw new Error('選項組代碼與名稱不可空白');
+    const items = [];
+    for (const it of g?.items || []) {
+      const itemName = String(it?.name || '').trim();
+      if (!itemName) throw new Error('選項名稱不可空白');
+      items.push({
+        name: itemName,
+        price_diff: Number(it?.price_diff) || 0,
+        is_default: it?.is_default ? 1 : 0,
+      });
+    }
+    rows.push({
+      code,
+      name,
+      is_multi: g?.is_multi ? 1 : 0,
+      required: g?.required ? 1 : 0,
+      items,
+    });
+  }
+  return rows;
+}
+function replaceCategorySpecs(db, categoryId, specs) {
+  const rows = normalizeSpecRows(specs);
+  if (!rows) return;
+  db.prepare('DELETE FROM category_specs WHERE category_id = ?').run(categoryId);
+  const ins = db.prepare(
+    'INSERT INTO category_specs (category_id, name, price_diff, sort_order) VALUES (?, ?, ?, ?)',
+  );
+  rows.forEach((s, i) => ins.run(categoryId, s.name, s.price_diff, i));
+}
+function replaceCategoryOptionGroups(db, categoryId, groups) {
+  const rows = normalizeOptionGroupRows(groups);
+  if (!rows) return;
+  db.prepare(
+    'DELETE FROM category_option_items WHERE group_id IN (SELECT id FROM category_option_groups WHERE category_id = ?)',
+  ).run(categoryId);
+  db.prepare('DELETE FROM category_option_groups WHERE category_id = ?').run(categoryId);
+  const insG = db.prepare(
+    'INSERT INTO category_option_groups (category_id, code, name, is_multi, required, sort_order) VALUES (?, ?, ?, ?, ?, ?)',
+  );
+  const insI = db.prepare(
+    'INSERT INTO category_option_items (group_id, name, price_diff, is_default, sort_order) VALUES (?, ?, ?, ?, ?)',
+  );
+  rows.forEach((g, gi) => {
+    const gid = Number(insG.run(categoryId, g.code, g.name, g.is_multi, g.required, gi).lastInsertRowid);
+    g.items.forEach((it, ii) => insI.run(gid, it.name, it.price_diff, it.is_default, ii));
+  });
+}
+function replaceProductSpecs(db, productId, specs) {
+  const rows = normalizeSpecRows(specs);
+  if (!rows) return;
+  db.prepare('DELETE FROM product_specs WHERE product_id = ?').run(productId);
+  const ins = db.prepare(
+    'INSERT INTO product_specs (product_id, name, price_diff, sort_order) VALUES (?, ?, ?, ?)',
+  );
+  rows.forEach((s, i) => ins.run(productId, s.name, s.price_diff, i));
+}
+function replaceProductOptionGroups(db, productId, groups) {
+  const rows = normalizeOptionGroupRows(groups);
+  if (!rows) return;
+  db.prepare(
+    'DELETE FROM product_option_items WHERE group_id IN (SELECT id FROM product_option_groups WHERE product_id = ?)',
+  ).run(productId);
+  db.prepare('DELETE FROM product_option_groups WHERE product_id = ?').run(productId);
+  const insG = db.prepare(
+    'INSERT INTO product_option_groups (product_id, code, name, is_multi, required, sort_order) VALUES (?, ?, ?, ?, ?, ?)',
+  );
+  const insI = db.prepare(
+    'INSERT INTO product_option_items (group_id, name, price_diff, is_default, sort_order) VALUES (?, ?, ?, ?, ?)',
+  );
+  rows.forEach((g, gi) => {
+    const gid = Number(insG.run(productId, g.code, g.name, g.is_multi, g.required, gi).lastInsertRowid);
+    g.items.forEach((it, ii) => insI.run(gid, it.name, it.price_diff, it.is_default, ii));
+  });
+}
+
+/** node:sqlite has no better-sqlite3-style db.transaction(); use BEGIN/COMMIT/ROLLBACK */
+function runInTransaction(db, fn) {
+  db.exec('BEGIN');
+  try {
+    const result = fn();
+    db.exec('COMMIT');
+    return result;
+  } catch (e) {
+    try { db.exec('ROLLBACK'); } catch { /* ignore */ }
+    throw e;
+  }
+}
+function attachProductOptionFields(db, product) {
+  const category_option_groups = listCategoryOptionGroups(db, product.category_id);
+  const product_option_groups = listProductOptionGroups(db, product.id);
+  const use_custom_options = Number(product.use_custom_options) === 1 ? 1 : 0;
+  const resolved_option_groups = resolveProductOptionGroups(db, product);
+  return {
+    ...product,
+    use_custom_options,
+    category_option_groups,
+    product_option_groups,
+    resolved_option_groups,
+  };
+}
+function attachProductFields(db, product) {
+  return attachProductOptionFields(db, attachProductSpecFields(db, product));
+}
+/** preferences 可能是字串或 {name, price_diff} */
+function prefEntries(preferences) {
+  if (!Array.isArray(preferences)) return [];
+  return preferences.map((p) => {
+    if (p && typeof p === 'object') {
+      return { name: String(p.name || ''), price_diff: Number(p.price_diff) || 0 };
+    }
+    return { name: String(p), price_diff: 0 };
+  }).filter((p) => p.name);
+}
+function prefsSum(preferences) {
+  return prefEntries(preferences).reduce((s, p) => s + (p.price_diff || 0), 0);
+}
+function prefsNames(preferences) {
+  return prefEntries(preferences).map((p) => p.name);
+}
+
 /** 依套餐選項計算單品總價（後端覆核，防止前端被改價） */
 function computeComboUnitPrice(db, product, it) {
   const rawOptions = it.options || null;
@@ -151,19 +396,24 @@ function computeComboUnitPrice(db, product, it) {
     if (options[key] && options[key].price_diff) unit += Number(options[key].price_diff) || 0;
   }
   for (const t of options.toppings || []) unit += Number(t.price_diff) || 0;
+  for (const s of options.specs || []) unit += Number(s.price_diff) || 0;
   if (options.drink && options.drink.product_id) {
     const dp = db.prepare('SELECT * FROM products WHERE id = ?').get(options.drink.product_id);
     if (dp) {
       const calc = computeDrinkPrice(db, Number(dp.price), options.drink.temperature || 'HOT');
+      const prefs = prefEntries(options.drink.preferences);
+      // 時段免費（final 0）不加口味加價；否則加上 preferences 的 price_diff
+      const priced = calc.price === 0 ? 0 : calc.price + prefsSum(prefs);
       options.drink = {
         ...options.drink,
         product_id: dp.id,
         name: dp.name,
         base_price: Number(dp.price),
-        final_price: calc.price,
+        preferences: prefs,
+        final_price: priced,
         period: calc.period,
       };
-      unit += calc.price;
+      unit += priced;
     }
   }
   return { unit, options };
@@ -218,28 +468,240 @@ app.get('/api/categories', (req, res) => {
   const rows = db.prepare(`
     SELECT c.*, (SELECT COUNT(*) FROM products p WHERE p.category_id = c.id AND p.is_available = 1) AS product_count
     FROM categories c WHERE c.is_deleted = 0 ORDER BY c.sort_order, c.id`).all();
-  ok(res, rows);
+  ok(res, rows.map((c) => ({
+    ...c,
+    include_drink_step: Number(c.include_drink_step) === 1 ? 1 : 0,
+    specs: listCategorySpecs(db, c.id),
+    option_groups: listCategoryOptionGroups(db, c.id),
+  })));
 });
 app.post('/api/categories', managerOnly, (req, res) => {
-  const { name, sort_order = 0 } = req.body || {};
+  const { name, sort_order = 0, include_drink_step = 0, specs, option_groups } = req.body || {};
   if (!name) return fail(res, '請輸入分類名稱');
   const db = getDb();
-  const r = db.prepare('INSERT INTO categories (name, sort_order) VALUES (?, ?)').run(name, sort_order);
-  ok(res, { id: Number(r.lastInsertRowid) });
+  try {
+    const id = runInTransaction(db, () => {
+      const r = db.prepare('INSERT INTO categories (name, sort_order, include_drink_step) VALUES (?, ?, ?)')
+        .run(name, sort_order, include_drink_step ? 1 : 0);
+      const newId = Number(r.lastInsertRowid);
+      replaceCategorySpecs(db, newId, specs);
+      replaceCategoryOptionGroups(db, newId, option_groups);
+      return newId;
+    });
+    ok(res, { id });
+  } catch (e) {
+    fail(res, e.message || '儲存失敗');
+  }
 });
 app.put('/api/categories/:id', managerOnly, (req, res) => {
   const db = getDb();
   const cat = db.prepare('SELECT * FROM categories WHERE id = ?').get(req.params.id);
   if (!cat) return fail(res, '分類不存在', 404);
-  const { name, sort_order } = req.body || {};
-  db.prepare('UPDATE categories SET name = ?, sort_order = ? WHERE id = ?')
-    .run(name ?? cat.name, sort_order ?? cat.sort_order, cat.id);
-  ok(res, { updated: true });
+  const { name, sort_order, include_drink_step, specs, option_groups } = req.body || {};
+  try {
+    runInTransaction(db, () => {
+      db.prepare('UPDATE categories SET name = ?, sort_order = ?, include_drink_step = ? WHERE id = ?')
+        .run(
+          name ?? cat.name,
+          sort_order ?? cat.sort_order,
+          include_drink_step !== undefined ? (include_drink_step ? 1 : 0) : (cat.include_drink_step ?? 0),
+          cat.id,
+        );
+      replaceCategorySpecs(db, cat.id, specs);
+      replaceCategoryOptionGroups(db, cat.id, option_groups);
+    });
+    ok(res, { updated: true });
+  } catch (e) {
+    fail(res, e.message || '儲存失敗');
+  }
 });
 app.delete('/api/categories/:id', managerOnly, (req, res) => {
   const db = getDb();
   db.prepare('UPDATE categories SET is_deleted = 1 WHERE id = ?').run(req.params.id);
   db.prepare('UPDATE products SET is_available = 0 WHERE category_id = ?').run(req.params.id);
+  ok(res, { deleted: true });
+});
+app.post('/api/categories/:id/specs', managerOnly, (req, res) => {
+  const db = getDb();
+  const cat = db.prepare('SELECT * FROM categories WHERE id = ? AND is_deleted = 0').get(req.params.id);
+  if (!cat) return fail(res, '分類不存在', 404);
+  const name = String(req.body?.name || '').trim();
+  if (!name) return fail(res, '請輸入規格名稱');
+  const price_diff = Number(req.body?.price_diff) || 0;
+  const max = db.prepare('SELECT COALESCE(MAX(sort_order), 0) AS m FROM category_specs WHERE category_id = ?').get(cat.id);
+  const r = db.prepare(
+    'INSERT INTO category_specs (category_id, name, price_diff, sort_order) VALUES (?, ?, ?, ?)',
+  ).run(cat.id, name, price_diff, Number(max?.m || 0) + 1);
+  ok(res, { id: Number(r.lastInsertRowid), category_id: cat.id, name, price_diff, sort_order: Number(max?.m || 0) + 1 });
+});
+app.put('/api/categories/:id/specs/reorder', managerOnly, (req, res) => {
+  const db = getDb();
+  const cat = db.prepare('SELECT * FROM categories WHERE id = ? AND is_deleted = 0').get(req.params.id);
+  if (!cat) return fail(res, '分類不存在', 404);
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(Number).filter(Boolean) : [];
+  if (!ids.length) return fail(res, '請提供排序清單');
+  const upd = db.prepare('UPDATE category_specs SET sort_order = ? WHERE id = ? AND category_id = ?');
+  db.exec('BEGIN');
+  try {
+    ids.forEach((id, i) => upd.run(i + 1, id, cat.id));
+    db.exec('COMMIT');
+  } catch (e) {
+    try { db.exec('ROLLBACK'); } catch { /* ignore */ }
+    throw e;
+  }
+  ok(res, { reordered: true, specs: listCategorySpecs(db, cat.id) });
+});
+app.put('/api/categories/:id/specs/:specId', managerOnly, (req, res) => {
+  const db = getDb();
+  const row = db.prepare('SELECT * FROM category_specs WHERE id = ? AND category_id = ?')
+    .get(req.params.specId, req.params.id);
+  if (!row) return fail(res, '規格不存在', 404);
+  const name = req.body?.name !== undefined ? String(req.body.name || '').trim() : row.name;
+  if (!name) return fail(res, '請輸入規格名稱');
+  const price_diff = req.body?.price_diff !== undefined ? Number(req.body.price_diff) || 0 : Number(row.price_diff) || 0;
+  db.prepare('UPDATE category_specs SET name = ?, price_diff = ? WHERE id = ?').run(name, price_diff, row.id);
+  ok(res, { id: row.id, category_id: row.category_id, name, price_diff, sort_order: row.sort_order });
+});
+app.delete('/api/categories/:id/specs/:specId', managerOnly, (req, res) => {
+  const db = getDb();
+  const row = db.prepare('SELECT * FROM category_specs WHERE id = ? AND category_id = ?')
+    .get(req.params.specId, req.params.id);
+  if (!row) return fail(res, '規格不存在', 404);
+  db.prepare('DELETE FROM category_specs WHERE id = ?').run(row.id);
+  ok(res, { deleted: true });
+});
+
+/* ---- 分類選項組 ---- */
+app.post('/api/categories/:id/option-groups', managerOnly, (req, res) => {
+  const db = getDb();
+  const cat = db.prepare('SELECT * FROM categories WHERE id = ? AND is_deleted = 0').get(req.params.id);
+  if (!cat) return fail(res, '分類不存在', 404);
+  const code = String(req.body?.code || '').trim();
+  const name = String(req.body?.name || '').trim();
+  if (!code || !name) return fail(res, '請輸入選項組代碼與名稱');
+  const exists = db.prepare('SELECT id FROM category_option_groups WHERE category_id = ? AND code = ?').get(cat.id, code);
+  if (exists) return fail(res, '此分類已有相同代碼的選項組');
+  const is_multi = req.body?.is_multi ? 1 : 0;
+  const required = req.body?.required === undefined || req.body?.required ? 1 : 0;
+  const max = db.prepare('SELECT COALESCE(MAX(sort_order), 0) AS m FROM category_option_groups WHERE category_id = ?').get(cat.id);
+  const sort_order = Number(max?.m || 0) + 1;
+  const r = db.prepare(
+    'INSERT INTO category_option_groups (category_id, code, name, is_multi, required, sort_order) VALUES (?, ?, ?, ?, ?, ?)',
+  ).run(cat.id, code, name, is_multi, required, sort_order);
+  ok(res, {
+    id: Number(r.lastInsertRowid), category_id: cat.id, code, name, is_multi, required, sort_order, items: [],
+  });
+});
+app.put('/api/categories/:id/option-groups/reorder', managerOnly, (req, res) => {
+  const db = getDb();
+  const cat = db.prepare('SELECT * FROM categories WHERE id = ? AND is_deleted = 0').get(req.params.id);
+  if (!cat) return fail(res, '分類不存在', 404);
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(Number).filter(Boolean) : [];
+  if (!ids.length) return fail(res, '請提供排序清單');
+  const upd = db.prepare('UPDATE category_option_groups SET sort_order = ? WHERE id = ? AND category_id = ?');
+  db.exec('BEGIN');
+  try {
+    ids.forEach((id, i) => upd.run(i + 1, id, cat.id));
+    db.exec('COMMIT');
+  } catch (e) {
+    try { db.exec('ROLLBACK'); } catch { /* ignore */ }
+    throw e;
+  }
+  ok(res, { reordered: true, option_groups: listCategoryOptionGroups(db, cat.id) });
+});
+app.put('/api/categories/:id/option-groups/:gid', managerOnly, (req, res) => {
+  const db = getDb();
+  const row = db.prepare('SELECT * FROM category_option_groups WHERE id = ? AND category_id = ?')
+    .get(req.params.gid, req.params.id);
+  if (!row) return fail(res, '選項組不存在', 404);
+  const code = req.body?.code !== undefined ? String(req.body.code || '').trim() : row.code;
+  const name = req.body?.name !== undefined ? String(req.body.name || '').trim() : row.name;
+  if (!code || !name) return fail(res, '請輸入選項組代碼與名稱');
+  if (code !== row.code) {
+    const exists = db.prepare('SELECT id FROM category_option_groups WHERE category_id = ? AND code = ? AND id != ?')
+      .get(row.category_id, code, row.id);
+    if (exists) return fail(res, '此分類已有相同代碼的選項組');
+  }
+  const is_multi = req.body?.is_multi !== undefined ? (req.body.is_multi ? 1 : 0) : Number(row.is_multi) || 0;
+  const required = req.body?.required !== undefined ? (req.body.required ? 1 : 0) : (Number(row.required) ? 1 : 0);
+  db.prepare('UPDATE category_option_groups SET code = ?, name = ?, is_multi = ?, required = ? WHERE id = ?')
+    .run(code, name, is_multi, required, row.id);
+  ok(res, { ...row, code, name, is_multi, required });
+});
+app.delete('/api/categories/:id/option-groups/:gid', managerOnly, (req, res) => {
+  const db = getDb();
+  const row = db.prepare('SELECT * FROM category_option_groups WHERE id = ? AND category_id = ?')
+    .get(req.params.gid, req.params.id);
+  if (!row) return fail(res, '選項組不存在', 404);
+  db.prepare('DELETE FROM category_option_items WHERE group_id = ?').run(row.id);
+  db.prepare('DELETE FROM category_option_groups WHERE id = ?').run(row.id);
+  ok(res, { deleted: true });
+});
+app.post('/api/categories/:id/option-groups/:gid/items', managerOnly, (req, res) => {
+  const db = getDb();
+  const group = db.prepare('SELECT * FROM category_option_groups WHERE id = ? AND category_id = ?')
+    .get(req.params.gid, req.params.id);
+  if (!group) return fail(res, '選項組不存在', 404);
+  const name = String(req.body?.name || '').trim();
+  if (!name) return fail(res, '請輸入選項名稱');
+  const price_diff = Number(req.body?.price_diff) || 0;
+  const is_default = req.body?.is_default ? 1 : 0;
+  if (is_default && !Number(group.is_multi)) {
+    db.prepare('UPDATE category_option_items SET is_default = 0 WHERE group_id = ?').run(group.id);
+  }
+  const max = db.prepare('SELECT COALESCE(MAX(sort_order), 0) AS m FROM category_option_items WHERE group_id = ?').get(group.id);
+  const sort_order = Number(max?.m || 0) + 1;
+  const r = db.prepare(
+    'INSERT INTO category_option_items (group_id, name, price_diff, is_default, sort_order) VALUES (?, ?, ?, ?, ?)',
+  ).run(group.id, name, price_diff, is_default, sort_order);
+  ok(res, { id: Number(r.lastInsertRowid), group_id: group.id, name, price_diff, is_default, sort_order });
+});
+app.put('/api/categories/:id/option-groups/:gid/items/reorder', managerOnly, (req, res) => {
+  const db = getDb();
+  const group = db.prepare('SELECT * FROM category_option_groups WHERE id = ? AND category_id = ?')
+    .get(req.params.gid, req.params.id);
+  if (!group) return fail(res, '選項組不存在', 404);
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(Number).filter(Boolean) : [];
+  if (!ids.length) return fail(res, '請提供排序清單');
+  const upd = db.prepare('UPDATE category_option_items SET sort_order = ? WHERE id = ? AND group_id = ?');
+  db.exec('BEGIN');
+  try {
+    ids.forEach((id, i) => upd.run(i + 1, id, group.id));
+    db.exec('COMMIT');
+  } catch (e) {
+    try { db.exec('ROLLBACK'); } catch { /* ignore */ }
+    throw e;
+  }
+  ok(res, { reordered: true });
+});
+app.put('/api/categories/:id/option-groups/:gid/items/:itemId', managerOnly, (req, res) => {
+  const db = getDb();
+  const group = db.prepare('SELECT * FROM category_option_groups WHERE id = ? AND category_id = ?')
+    .get(req.params.gid, req.params.id);
+  if (!group) return fail(res, '選項組不存在', 404);
+  const row = db.prepare('SELECT * FROM category_option_items WHERE id = ? AND group_id = ?')
+    .get(req.params.itemId, group.id);
+  if (!row) return fail(res, '選項不存在', 404);
+  const name = req.body?.name !== undefined ? String(req.body.name || '').trim() : row.name;
+  if (!name) return fail(res, '請輸入選項名稱');
+  const price_diff = req.body?.price_diff !== undefined ? Number(req.body.price_diff) || 0 : Number(row.price_diff) || 0;
+  const is_default = req.body?.is_default !== undefined ? (req.body.is_default ? 1 : 0) : Number(row.is_default) || 0;
+  if (is_default && !Number(group.is_multi)) {
+    db.prepare('UPDATE category_option_items SET is_default = 0 WHERE group_id = ?').run(group.id);
+  }
+  db.prepare('UPDATE category_option_items SET name = ?, price_diff = ?, is_default = ? WHERE id = ?')
+    .run(name, price_diff, is_default, row.id);
+  ok(res, { id: row.id, group_id: group.id, name, price_diff, is_default, sort_order: row.sort_order });
+});
+app.delete('/api/categories/:id/option-groups/:gid/items/:itemId', managerOnly, (req, res) => {
+  const db = getDb();
+  const group = db.prepare('SELECT * FROM category_option_groups WHERE id = ? AND category_id = ?')
+    .get(req.params.gid, req.params.id);
+  if (!group) return fail(res, '選項組不存在', 404);
+  const row = db.prepare('SELECT * FROM category_option_items WHERE id = ? AND group_id = ?')
+    .get(req.params.itemId, group.id);
+  if (!row) return fail(res, '選項不存在', 404);
+  db.prepare('DELETE FROM category_option_items WHERE id = ?').run(row.id);
   ok(res, { deleted: true });
 });
 
@@ -252,33 +714,273 @@ app.get('/api/products', (req, res) => {
   if (category_id) { sql += ' AND p.category_id = ?'; args.push(category_id); }
   if (all !== '1') sql += ' AND p.is_available = 1';
   sql += ' ORDER BY p.id';
-  ok(res, db.prepare(sql).all(...args));
+  ok(res, db.prepare(sql).all(...args).map((p) => attachProductFields(db, p)));
 });
 app.post('/api/products', managerOnly, (req, res) => {
-  const { category_id, name, price, barcode, emoji, color, specs, is_available } = req.body || {};
+  const {
+    category_id, name, price, barcode, emoji, color, is_available, use_custom_specs, use_custom_options,
+    specs, option_groups,
+  } = req.body || {};
   if (!name || price == null) return fail(res, '請輸入名稱與價格');
   const db = getDb();
-  const r = db.prepare(`INSERT INTO products (category_id, name, price, barcode, emoji, color, specs, is_available)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(category_id ?? null, name, Number(price), barcode ?? null,
-    emoji ?? '🍽️', color ?? '#f59e0b', specs ? JSON.stringify(specs) : null, is_available ?? 1);
-  ok(res, { id: Number(r.lastInsertRowid) });
+  try {
+    const id = runInTransaction(db, () => {
+      const r = db.prepare(`INSERT INTO products (category_id, name, price, barcode, emoji, color, is_available, use_custom_specs, use_custom_options)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(category_id ?? null, name, Number(price), barcode ?? null,
+        emoji ?? '🍽️', color ?? '#f59e0b', is_available ?? 1, use_custom_specs ? 1 : 0, use_custom_options ? 1 : 0);
+      const newId = Number(r.lastInsertRowid);
+      if (use_custom_specs) replaceProductSpecs(db, newId, Array.isArray(specs) ? specs : []);
+      if (use_custom_options) replaceProductOptionGroups(db, newId, Array.isArray(option_groups) ? option_groups : []);
+      return newId;
+    });
+    ok(res, { id });
+  } catch (e) {
+    fail(res, e.message || '儲存失敗');
+  }
 });
 app.put('/api/products/:id', managerOnly, (req, res) => {
   const db = getDb();
   const p = db.prepare('SELECT * FROM products WHERE id = ?').get(req.params.id);
   if (!p) return fail(res, '菜品不存在', 404);
-  const { category_id, name, price, barcode, emoji, color, specs, is_available } = req.body || {};
-  db.prepare(`UPDATE products SET category_id = ?, name = ?, price = ?, barcode = ?, emoji = ?, color = ?,
-    specs = ?, is_available = ? WHERE id = ?`).run(
-    category_id ?? p.category_id, name ?? p.name, price ?? p.price, barcode ?? p.barcode,
-    emoji ?? p.emoji, color ?? p.color,
-    specs !== undefined ? (specs ? JSON.stringify(specs) : null) : p.specs,
-    is_available ?? p.is_available, p.id);
-  ok(res, { updated: true });
+  const {
+    category_id, name, price, barcode, emoji, color, is_available, use_custom_specs, use_custom_options,
+    specs, option_groups,
+  } = req.body || {};
+  const hasOptionGroupsPayload = Array.isArray(option_groups);
+  const hasSpecsPayload = Array.isArray(specs);
+  try {
+    runInTransaction(db, () => {
+      let nextCustomOptions = p.use_custom_options ?? 0;
+      if (use_custom_options !== undefined) {
+        const on = use_custom_options ? 1 : 0;
+        if (on && !Number(p.use_custom_options)) {
+          if (hasOptionGroupsPayload) {
+            db.prepare('UPDATE products SET use_custom_options = 1 WHERE id = ?').run(p.id);
+          } else {
+            const existing = listProductOptionGroups(db, p.id);
+            if (!existing.length) copyCategoryOptionsToProduct(db, p);
+            else db.prepare('UPDATE products SET use_custom_options = 1 WHERE id = ?').run(p.id);
+          }
+        } else if (!on) {
+          db.prepare('UPDATE products SET use_custom_options = 0 WHERE id = ?').run(p.id);
+        }
+        nextCustomOptions = on;
+      }
+      const nextCustomSpecs = use_custom_specs !== undefined
+        ? (use_custom_specs ? 1 : 0)
+        : (p.use_custom_specs ?? 0);
+      db.prepare(`UPDATE products SET category_id = ?, name = ?, price = ?, barcode = ?, emoji = ?, color = ?,
+        is_available = ?, use_custom_specs = ?, use_custom_options = ? WHERE id = ?`).run(
+        category_id ?? p.category_id, name ?? p.name, price ?? p.price, barcode ?? p.barcode,
+        emoji ?? p.emoji, color ?? p.color,
+        is_available ?? p.is_available,
+        nextCustomSpecs,
+        nextCustomOptions,
+        p.id);
+      if (hasSpecsPayload && nextCustomSpecs) replaceProductSpecs(db, p.id, specs);
+      if (hasOptionGroupsPayload && nextCustomOptions) replaceProductOptionGroups(db, p.id, option_groups);
+    });
+    ok(res, { updated: true });
+  } catch (e) {
+    fail(res, e.message || '儲存失敗');
+  }
 });
 app.delete('/api/products/:id', managerOnly, (req, res) => {
   const db = getDb();
+  db.prepare('DELETE FROM product_specs WHERE product_id = ?').run(req.params.id);
+  db.prepare(
+    'DELETE FROM product_option_items WHERE group_id IN (SELECT id FROM product_option_groups WHERE product_id = ?)',
+  ).run(req.params.id);
+  db.prepare('DELETE FROM product_option_groups WHERE product_id = ?').run(req.params.id);
   db.prepare('DELETE FROM products WHERE id = ?').run(req.params.id);
+  ok(res, { deleted: true });
+});
+app.post('/api/products/:id/specs', managerOnly, (req, res) => {
+  const db = getDb();
+  const p = db.prepare('SELECT * FROM products WHERE id = ?').get(req.params.id);
+  if (!p) return fail(res, '菜品不存在', 404);
+  const name = String(req.body?.name || '').trim();
+  if (!name) return fail(res, '請輸入規格名稱');
+  const price_diff = Number(req.body?.price_diff) || 0;
+  const max = db.prepare('SELECT COALESCE(MAX(sort_order), 0) AS m FROM product_specs WHERE product_id = ?').get(p.id);
+  const r = db.prepare(
+    'INSERT INTO product_specs (product_id, name, price_diff, sort_order) VALUES (?, ?, ?, ?)',
+  ).run(p.id, name, price_diff, Number(max?.m || 0) + 1);
+  // 新增自訂規格時自動開啟覆寫
+  db.prepare('UPDATE products SET use_custom_specs = 1 WHERE id = ?').run(p.id);
+  ok(res, { id: Number(r.lastInsertRowid), product_id: p.id, name, price_diff, sort_order: Number(max?.m || 0) + 1 });
+});
+app.put('/api/products/:id/specs/reorder', managerOnly, (req, res) => {
+  const db = getDb();
+  const p = db.prepare('SELECT * FROM products WHERE id = ?').get(req.params.id);
+  if (!p) return fail(res, '菜品不存在', 404);
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(Number).filter(Boolean) : [];
+  if (!ids.length) return fail(res, '請提供排序清單');
+  const upd = db.prepare('UPDATE product_specs SET sort_order = ? WHERE id = ? AND product_id = ?');
+  db.exec('BEGIN');
+  try {
+    ids.forEach((id, i) => upd.run(i + 1, id, p.id));
+    db.exec('COMMIT');
+  } catch (e) {
+    try { db.exec('ROLLBACK'); } catch { /* ignore */ }
+    throw e;
+  }
+  ok(res, { reordered: true, specs: listProductSpecs(db, p.id) });
+});
+app.put('/api/products/:id/specs/:specId', managerOnly, (req, res) => {
+  const db = getDb();
+  const row = db.prepare('SELECT * FROM product_specs WHERE id = ? AND product_id = ?')
+    .get(req.params.specId, req.params.id);
+  if (!row) return fail(res, '規格不存在', 404);
+  const name = req.body?.name !== undefined ? String(req.body.name || '').trim() : row.name;
+  if (!name) return fail(res, '請輸入規格名稱');
+  const price_diff = req.body?.price_diff !== undefined ? Number(req.body.price_diff) || 0 : Number(row.price_diff) || 0;
+  db.prepare('UPDATE product_specs SET name = ?, price_diff = ? WHERE id = ?').run(name, price_diff, row.id);
+  ok(res, { id: row.id, product_id: row.product_id, name, price_diff, sort_order: row.sort_order });
+});
+app.delete('/api/products/:id/specs/:specId', managerOnly, (req, res) => {
+  const db = getDb();
+  const row = db.prepare('SELECT * FROM product_specs WHERE id = ? AND product_id = ?')
+    .get(req.params.specId, req.params.id);
+  if (!row) return fail(res, '規格不存在', 404);
+  db.prepare('DELETE FROM product_specs WHERE id = ?').run(row.id);
+  ok(res, { deleted: true });
+});
+
+/* ---- 菜品選項組（覆寫） ---- */
+app.post('/api/products/:id/option-groups', managerOnly, (req, res) => {
+  const db = getDb();
+  const p = db.prepare('SELECT * FROM products WHERE id = ?').get(req.params.id);
+  if (!p) return fail(res, '菜品不存在', 404);
+  const code = String(req.body?.code || '').trim();
+  const name = String(req.body?.name || '').trim();
+  if (!code || !name) return fail(res, '請輸入選項組代碼與名稱');
+  const exists = db.prepare('SELECT id FROM product_option_groups WHERE product_id = ? AND code = ?').get(p.id, code);
+  if (exists) return fail(res, '此菜品已有相同代碼的選項組');
+  const is_multi = req.body?.is_multi ? 1 : 0;
+  const required = req.body?.required === undefined || req.body?.required ? 1 : 0;
+  const max = db.prepare('SELECT COALESCE(MAX(sort_order), 0) AS m FROM product_option_groups WHERE product_id = ?').get(p.id);
+  const sort_order = Number(max?.m || 0) + 1;
+  const r = db.prepare(
+    'INSERT INTO product_option_groups (product_id, code, name, is_multi, required, sort_order) VALUES (?, ?, ?, ?, ?, ?)',
+  ).run(p.id, code, name, is_multi, required, sort_order);
+  db.prepare('UPDATE products SET use_custom_options = 1 WHERE id = ?').run(p.id);
+  ok(res, {
+    id: Number(r.lastInsertRowid), product_id: p.id, code, name, is_multi, required, sort_order, items: [],
+  });
+});
+app.put('/api/products/:id/option-groups/reorder', managerOnly, (req, res) => {
+  const db = getDb();
+  const p = db.prepare('SELECT * FROM products WHERE id = ?').get(req.params.id);
+  if (!p) return fail(res, '菜品不存在', 404);
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(Number).filter(Boolean) : [];
+  if (!ids.length) return fail(res, '請提供排序清單');
+  const upd = db.prepare('UPDATE product_option_groups SET sort_order = ? WHERE id = ? AND product_id = ?');
+  db.exec('BEGIN');
+  try {
+    ids.forEach((id, i) => upd.run(i + 1, id, p.id));
+    db.exec('COMMIT');
+  } catch (e) {
+    try { db.exec('ROLLBACK'); } catch { /* ignore */ }
+    throw e;
+  }
+  ok(res, { reordered: true, option_groups: listProductOptionGroups(db, p.id) });
+});
+app.put('/api/products/:id/option-groups/:gid', managerOnly, (req, res) => {
+  const db = getDb();
+  const row = db.prepare('SELECT * FROM product_option_groups WHERE id = ? AND product_id = ?')
+    .get(req.params.gid, req.params.id);
+  if (!row) return fail(res, '選項組不存在', 404);
+  const code = req.body?.code !== undefined ? String(req.body.code || '').trim() : row.code;
+  const name = req.body?.name !== undefined ? String(req.body.name || '').trim() : row.name;
+  if (!code || !name) return fail(res, '請輸入選項組代碼與名稱');
+  if (code !== row.code) {
+    const exists = db.prepare('SELECT id FROM product_option_groups WHERE product_id = ? AND code = ? AND id != ?')
+      .get(row.product_id, code, row.id);
+    if (exists) return fail(res, '此菜品已有相同代碼的選項組');
+  }
+  const is_multi = req.body?.is_multi !== undefined ? (req.body.is_multi ? 1 : 0) : Number(row.is_multi) || 0;
+  const required = req.body?.required !== undefined ? (req.body.required ? 1 : 0) : (Number(row.required) ? 1 : 0);
+  db.prepare('UPDATE product_option_groups SET code = ?, name = ?, is_multi = ?, required = ? WHERE id = ?')
+    .run(code, name, is_multi, required, row.id);
+  db.prepare('UPDATE products SET use_custom_options = 1 WHERE id = ?').run(row.product_id);
+  ok(res, { ...row, code, name, is_multi, required });
+});
+app.delete('/api/products/:id/option-groups/:gid', managerOnly, (req, res) => {
+  const db = getDb();
+  const row = db.prepare('SELECT * FROM product_option_groups WHERE id = ? AND product_id = ?')
+    .get(req.params.gid, req.params.id);
+  if (!row) return fail(res, '選項組不存在', 404);
+  db.prepare('DELETE FROM product_option_items WHERE group_id = ?').run(row.id);
+  db.prepare('DELETE FROM product_option_groups WHERE id = ?').run(row.id);
+  ok(res, { deleted: true });
+});
+app.post('/api/products/:id/option-groups/:gid/items', managerOnly, (req, res) => {
+  const db = getDb();
+  const group = db.prepare('SELECT * FROM product_option_groups WHERE id = ? AND product_id = ?')
+    .get(req.params.gid, req.params.id);
+  if (!group) return fail(res, '選項組不存在', 404);
+  const name = String(req.body?.name || '').trim();
+  if (!name) return fail(res, '請輸入選項名稱');
+  const price_diff = Number(req.body?.price_diff) || 0;
+  const is_default = req.body?.is_default ? 1 : 0;
+  if (is_default && !Number(group.is_multi)) {
+    db.prepare('UPDATE product_option_items SET is_default = 0 WHERE group_id = ?').run(group.id);
+  }
+  const max = db.prepare('SELECT COALESCE(MAX(sort_order), 0) AS m FROM product_option_items WHERE group_id = ?').get(group.id);
+  const sort_order = Number(max?.m || 0) + 1;
+  const r = db.prepare(
+    'INSERT INTO product_option_items (group_id, name, price_diff, is_default, sort_order) VALUES (?, ?, ?, ?, ?)',
+  ).run(group.id, name, price_diff, is_default, sort_order);
+  db.prepare('UPDATE products SET use_custom_options = 1 WHERE id = ?').run(group.product_id);
+  ok(res, { id: Number(r.lastInsertRowid), group_id: group.id, name, price_diff, is_default, sort_order });
+});
+app.put('/api/products/:id/option-groups/:gid/items/reorder', managerOnly, (req, res) => {
+  const db = getDb();
+  const group = db.prepare('SELECT * FROM product_option_groups WHERE id = ? AND product_id = ?')
+    .get(req.params.gid, req.params.id);
+  if (!group) return fail(res, '選項組不存在', 404);
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(Number).filter(Boolean) : [];
+  if (!ids.length) return fail(res, '請提供排序清單');
+  const upd = db.prepare('UPDATE product_option_items SET sort_order = ? WHERE id = ? AND group_id = ?');
+  db.exec('BEGIN');
+  try {
+    ids.forEach((id, i) => upd.run(i + 1, id, group.id));
+    db.exec('COMMIT');
+  } catch (e) {
+    try { db.exec('ROLLBACK'); } catch { /* ignore */ }
+    throw e;
+  }
+  ok(res, { reordered: true });
+});
+app.put('/api/products/:id/option-groups/:gid/items/:itemId', managerOnly, (req, res) => {
+  const db = getDb();
+  const group = db.prepare('SELECT * FROM product_option_groups WHERE id = ? AND product_id = ?')
+    .get(req.params.gid, req.params.id);
+  if (!group) return fail(res, '選項組不存在', 404);
+  const row = db.prepare('SELECT * FROM product_option_items WHERE id = ? AND group_id = ?')
+    .get(req.params.itemId, group.id);
+  if (!row) return fail(res, '選項不存在', 404);
+  const name = req.body?.name !== undefined ? String(req.body.name || '').trim() : row.name;
+  if (!name) return fail(res, '請輸入選項名稱');
+  const price_diff = req.body?.price_diff !== undefined ? Number(req.body.price_diff) || 0 : Number(row.price_diff) || 0;
+  const is_default = req.body?.is_default !== undefined ? (req.body.is_default ? 1 : 0) : Number(row.is_default) || 0;
+  if (is_default && !Number(group.is_multi)) {
+    db.prepare('UPDATE product_option_items SET is_default = 0 WHERE group_id = ?').run(group.id);
+  }
+  db.prepare('UPDATE product_option_items SET name = ?, price_diff = ?, is_default = ? WHERE id = ?')
+    .run(name, price_diff, is_default, row.id);
+  ok(res, { id: row.id, group_id: group.id, name, price_diff, is_default, sort_order: row.sort_order });
+});
+app.delete('/api/products/:id/option-groups/:gid/items/:itemId', managerOnly, (req, res) => {
+  const db = getDb();
+  const group = db.prepare('SELECT * FROM product_option_groups WHERE id = ? AND product_id = ?')
+    .get(req.params.gid, req.params.id);
+  if (!group) return fail(res, '選項組不存在', 404);
+  const row = db.prepare('SELECT * FROM product_option_items WHERE id = ? AND group_id = ?')
+    .get(req.params.itemId, group.id);
+  if (!row) return fail(res, '選項不存在', 404);
+  db.prepare('DELETE FROM product_option_items WHERE id = ?').run(row.id);
   ok(res, { deleted: true });
 });
 
@@ -299,20 +1001,27 @@ app.get('/api/menu', (req, res) => {
   const catMap = new Map(out.map((c) => [c.id, c]));
   const DRINK_GROUP = { id: 0, code: 'drink', name: '選擇飲品（跟餐）', is_multi: 0, items: [] };
   for (const p of products) {
-    const steps = links
-      .filter((l) => l.product_id === p.id)
-      .map((l) => {
-        const g = l.group_id ? groupMap.get(l.group_id) : DRINK_GROUP;
-        return g ? { ...g, step: l.step, required: Number(l.required) } : null;
-      })
-      .filter(Boolean);
-    const entry = { ...p, steps };
-    const c = catMap.get(p.category_id);
-    if (c) c.products.push(entry);
+    const cat = catMap.get(p.category_id);
+    let steps;
+    if (categoryHasOptionGroups(db, p.category_id)) {
+      const resolved = resolveProductOptionGroups(db, p);
+      const includeDrink = Number(cat?.include_drink_step) === 1;
+      steps = buildStepsFromOptionGroups(resolved, includeDrink);
+    } else {
+      steps = links
+        .filter((l) => l.product_id === p.id)
+        .map((l) => {
+          const g = l.group_id ? groupMap.get(l.group_id) : DRINK_GROUP;
+          return g ? { ...g, step: l.step, required: Number(l.required) } : null;
+        })
+        .filter(Boolean);
+    }
+    const entry = { ...attachProductFields(db, p), steps };
+    if (cat) cat.products.push(entry);
   }
   ok(res, {
     categories: out.filter((c) => c.products.length),
-    drinks: products.filter((p) => Number(p.is_drink) === 1),
+    drinks: products.filter((p) => Number(p.is_drink) === 1).map((p) => attachProductFields(db, p)),
   });
 });
 

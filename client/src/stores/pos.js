@@ -198,10 +198,16 @@ export const usePosStore = defineStore('pos', {
         this.selectItem(row);
       }
     },
-    /** 獨立飲品：temperature HOT/COLD，preferences 口味標籤 */
+    /** 獨立飲品：temperature HOT/COLD，preferences 口味標籤（{name, price_diff} 或字串） */
     async addDrink(product, { temperature, preferences = [] }, qty = 1) {
-      const options = { drink: { product_id: product.id, name: product.name, temperature, preferences } };
+      const prefs = (preferences || []).map((p) => (
+        p && typeof p === 'object'
+          ? { name: String(p.name || ''), price_diff: Number(p.price_diff) || 0 }
+          : { name: String(p), price_diff: 0 }
+      )).filter((p) => p.name);
+      const options = { drink: { product_id: product.id, name: product.name, temperature, preferences: prefs } };
       const tempLabel = temperature === 'HOT' ? '熱' : '凍';
+      const remark = prefs.map((p) => p.name).join('、');
       if (this.orderId) {
         const it = await api.post(`/orders/${this.orderId}/items`, {
           product_id: product.id, quantity: qty, options, spec: tempLabel,
@@ -217,7 +223,7 @@ export const usePosStore = defineStore('pos', {
           price: Number(product.price), // 後端結帳時依時段覆核
           qty,
           spec: tempLabel,
-          remark: preferences.join('、'),
+          remark,
           item_type: 'simple',
           options,
         };

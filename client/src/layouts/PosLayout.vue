@@ -9,6 +9,7 @@ import { useToastStore } from '@shared/stores/toast';
 import { usePosStore } from '../stores/pos';
 import Modal from '@shared/components/Modal.vue';
 import { fmtMoney, fmtTime, PAYMENT_META, ORDER_STATUS, today } from '@shared/utils/format';
+import { specNames } from '@shared/utils/pricing';
 
 const route = useRoute();
 const router = useRouter();
@@ -115,10 +116,12 @@ function optionLines(item) {
   if (o.spiciness) lines.push(`辣度: ${o.spiciness.name}`);
   if (o.filling) lines.push(`餡料: ${o.filling.name}`);
   if (o.flavor) lines.push(`口味: ${o.flavor.name}`);
+  if (o.specs && o.specs.length) lines.push(`規格: ${o.specs.map((t) => t.name).join('、')}`);
   if (o.toppings && o.toppings.length) lines.push(`加料: ${o.toppings.map((t) => t.name).join('、')}`);
   if (o.drink) {
     const t = o.drink.temperature === 'HOT' ? '熱' : '凍';
-    const prefs = o.drink.preferences && o.drink.preferences.length ? `, ${o.drink.preferences.join('、')}` : '';
+    const names = specNames(o.drink.preferences);
+    const prefs = names.length ? `, ${names.join('、')}` : '';
     const price = Number(o.drink.final_price) === 0 ? '免費' : fmtMoney(o.drink.final_price, catalog.currency);
     lines.push(`飲品: ${o.drink.name}(${t}${prefs}) ${price}`);
   }

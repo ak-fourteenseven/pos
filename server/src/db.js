@@ -67,7 +67,8 @@ CREATE TABLE IF NOT EXISTS categories (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
   sort_order INTEGER DEFAULT 0,
-  is_deleted INTEGER DEFAULT 0
+  is_deleted INTEGER DEFAULT 0,
+  include_drink_step INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS products (
@@ -79,7 +80,6 @@ CREATE TABLE IF NOT EXISTS products (
   image_path TEXT,
   emoji TEXT DEFAULT '🍽️',
   color TEXT DEFAULT '#f59e0b',
-  specs TEXT,
   is_available INTEGER DEFAULT 1,
   created_at DATETIME DEFAULT (datetime('now','localtime')),
   FOREIGN KEY(category_id) REFERENCES categories(id)
@@ -207,6 +207,70 @@ CREATE TABLE IF NOT EXISTS time_slots (
   drink_cold_extra REAL DEFAULT 0,
   drink_hot_free INTEGER DEFAULT 0
 );
+
+-- 分類預設規格（可選多選標籤，含加價；飲品 UI 顯示為「口味」）
+CREATE TABLE IF NOT EXISTS category_specs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  category_id INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  price_diff REAL DEFAULT 0,
+  sort_order INTEGER DEFAULT 0,
+  FOREIGN KEY(category_id) REFERENCES categories(id)
+);
+
+-- 菜品自訂規格（use_custom_specs=1 時覆寫分類預設）
+CREATE TABLE IF NOT EXISTS product_specs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  product_id INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  price_diff REAL DEFAULT 0,
+  sort_order INTEGER DEFAULT 0,
+  FOREIGN KEY(product_id) REFERENCES products(id)
+);
+
+-- 分類選項組（麵類／辣度／配料／餡料等；套餐向導步驟）
+CREATE TABLE IF NOT EXISTS category_option_groups (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  category_id INTEGER NOT NULL,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  is_multi INTEGER DEFAULT 0,
+  required INTEGER DEFAULT 1,
+  sort_order INTEGER DEFAULT 0,
+  FOREIGN KEY(category_id) REFERENCES categories(id)
+);
+
+CREATE TABLE IF NOT EXISTS category_option_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  price_diff REAL DEFAULT 0,
+  is_default INTEGER DEFAULT 0,
+  sort_order INTEGER DEFAULT 0,
+  FOREIGN KEY(group_id) REFERENCES category_option_groups(id)
+);
+
+-- 菜品自訂選項組（use_custom_options=1 時覆寫分類預設）
+CREATE TABLE IF NOT EXISTS product_option_groups (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  product_id INTEGER NOT NULL,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  is_multi INTEGER DEFAULT 0,
+  required INTEGER DEFAULT 1,
+  sort_order INTEGER DEFAULT 0,
+  FOREIGN KEY(product_id) REFERENCES products(id)
+);
+
+CREATE TABLE IF NOT EXISTS product_option_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  price_diff REAL DEFAULT 0,
+  is_default INTEGER DEFAULT 0,
+  sort_order INTEGER DEFAULT 0,
+  FOREIGN KEY(group_id) REFERENCES product_option_groups(id)
+);
 `;
 
 /* ---------------- 種子資料 ---------------- */
@@ -263,17 +327,17 @@ function seed() {
   cats.forEach((n, i) => insertCat.run(n, i + 1));
 
   const insertProduct = d.prepare(`INSERT INTO products
-    (category_id, name, price, emoji, color, specs, is_available) VALUES (?, ?, ?, ?, ?, ?, 1)`);
-  const P = (catId, name, price, emoji, color, specs = null) =>
-    insertProduct.run(catId, name, price, emoji, color, specs ? JSON.stringify(specs) : null);
+    (category_id, name, price, emoji, color, is_available) VALUES (?, ?, ?, ?, ?, 1)`);
+  const P = (catId, name, price, emoji, color) =>
+    insertProduct.run(catId, name, price, emoji, color);
 
   // 飲品
-  P(1, '珍珠奶茶', 55, '🧋', '#b45309', [{ name: '中杯', diff: -5 }, { name: '大杯', diff: 0 }]);
+  P(1, '珍珠奶茶', 55, '🧋', '#b45309');
   P(1, '檸檬紅茶', 45, '🍋', '#65a30d');
   P(1, '百香綠茶', 50, '🥤', '#16a34a');
   P(1, '鮮榨西瓜汁', 60, '🍉', '#dc2626');
   // 咖啡
-  P(2, '美式咖啡', 65, '☕', '#57534e', [{ name: '中杯', diff: -10 }, { name: '大杯', diff: 0 }]);
+  P(2, '美式咖啡', 65, '☕', '#57534e');
   P(2, '拿鐵', 80, '🍶', '#a16207');
   P(2, '卡布奇諾', 85, '☕', '#92400e');
   P(2, '焦糖瑪奇朵', 95, '🍮', '#d97706');
@@ -283,7 +347,7 @@ function seed() {
   P(3, '牛肉麵', 120, '🍜', '#b91c1c');
   P(3, '肉燥飯', 50, '🍚', '#a16207');
   // 小食
-  P(4, '鹽酥雞', 60, '🍗', '#f59e0b', [{ name: '小份', diff: -15 }, { name: '大份', diff: 0 }]);
+  P(4, '鹽酥雞', 60, '🍗', '#f59e0b');
   P(4, '薯條', 45, '🍟', '#eab308');
   P(4, '洋蔥圈', 50, '🧅', '#ca8a04');
   // 甜點
@@ -307,6 +371,77 @@ function migrate() {
   add('products', 'kind', "kind TEXT DEFAULT 'simple'");
   add('products', 'is_drink', 'is_drink INTEGER DEFAULT 0');
   add('products', 'skip_group', 'skip_group TEXT');
+  add('products', 'use_custom_specs', 'use_custom_specs INTEGER DEFAULT 0');
+  add('products', 'use_custom_options', 'use_custom_options INTEGER DEFAULT 0');
+  add('categories', 'include_drink_step', 'include_drink_step INTEGER DEFAULT 0');
+  // 移除舊版份量 JSON 欄位 products.specs（改由 category_specs / product_specs）
+  if (cols('products').includes('specs')) {
+    try {
+      d.exec('ALTER TABLE products DROP COLUMN specs');
+    } catch {
+      d.prepare('UPDATE products SET specs = NULL').run();
+    }
+  }
+  d.exec(`CREATE TABLE IF NOT EXISTS category_specs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    category_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    price_diff REAL DEFAULT 0,
+    sort_order INTEGER DEFAULT 0,
+    FOREIGN KEY(category_id) REFERENCES categories(id)
+  )`);
+  d.exec(`CREATE TABLE IF NOT EXISTS product_specs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    price_diff REAL DEFAULT 0,
+    sort_order INTEGER DEFAULT 0,
+    FOREIGN KEY(product_id) REFERENCES products(id)
+  )`);
+  d.exec(`CREATE TABLE IF NOT EXISTS category_option_groups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    category_id INTEGER NOT NULL,
+    code TEXT NOT NULL,
+    name TEXT NOT NULL,
+    is_multi INTEGER DEFAULT 0,
+    required INTEGER DEFAULT 1,
+    sort_order INTEGER DEFAULT 0,
+    FOREIGN KEY(category_id) REFERENCES categories(id)
+  )`);
+  d.exec(`CREATE TABLE IF NOT EXISTS category_option_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    price_diff REAL DEFAULT 0,
+    is_default INTEGER DEFAULT 0,
+    sort_order INTEGER DEFAULT 0,
+    FOREIGN KEY(group_id) REFERENCES category_option_groups(id)
+  )`);
+  d.exec(`CREATE TABLE IF NOT EXISTS product_option_groups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_id INTEGER NOT NULL,
+    code TEXT NOT NULL,
+    name TEXT NOT NULL,
+    is_multi INTEGER DEFAULT 0,
+    required INTEGER DEFAULT 1,
+    sort_order INTEGER DEFAULT 0,
+    FOREIGN KEY(product_id) REFERENCES products(id)
+  )`);
+  d.exec(`CREATE TABLE IF NOT EXISTS product_option_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    price_diff REAL DEFAULT 0,
+    is_default INTEGER DEFAULT 0,
+    sort_order INTEGER DEFAULT 0,
+    FOREIGN KEY(group_id) REFERENCES product_option_groups(id)
+  )`);
+  // 既有庫：飲品分類尚無規格時，補上預設口味標籤
+  seedDrinkCategorySpecsIfEmpty(d);
+  // 既有庫：湯底／湯餃分類尚無規格時，補上預設規格
+  seedSoupCategorySpecsIfEmpty(d);
+  // 既有庫：湯底／湯餃從全域 option_groups 遷移為分類選項組
+  migrateCategoryOptionGroupsFromGlobal(d);
   add('order_items', 'item_type', "item_type TEXT DEFAULT 'simple'");
   add('order_items', 'options', 'options TEXT');
   add('orders', 'refunded_at', 'refunded_at TEXT');
@@ -439,43 +574,25 @@ function seedNoodleMenuInner(d) {
   d.exec('UPDATE products SET is_available = 0');
   d.exec('UPDATE categories SET is_deleted = 1');
 
-  const insCat = d.prepare('INSERT INTO categories (name, sort_order) VALUES (?, ?)');
-  const catSoup = Number(insCat.run('湯底套餐', 1).lastInsertRowid);
-  const catDumpling = Number(insCat.run('湯餃套餐', 2).lastInsertRowid);
-  const catSnack = Number(insCat.run('精美小食', 3).lastInsertRowid);
-  const catDrink = Number(insCat.run('飲品（跟餐）', 4).lastInsertRowid);
+  const insCat = d.prepare('INSERT INTO categories (name, sort_order, include_drink_step) VALUES (?, ?, ?)');
+  const catSoup = Number(insCat.run('湯底套餐', 1, 1).lastInsertRowid);
+  const catDumpling = Number(insCat.run('湯餃套餐', 2, 1).lastInsertRowid);
+  const catSnack = Number(insCat.run('精美小食', 3, 0).lastInsertRowid);
+  const catDrink = Number(insCat.run('飲品（跟餐）', 4, 0).lastInsertRowid);
 
-  // 選項組
+  // 全域選項組僅保留小食口味（legacy product_options）
   const insGroup = d.prepare('INSERT INTO option_groups (code, name, is_multi, sort_order) VALUES (?, ?, ?, ?)');
-  const gNoodle = Number(insGroup.run('noodle', '麵類', 0, 1).lastInsertRowid);
-  const gSpice = Number(insGroup.run('spiciness', '辣度', 0, 2).lastInsertRowid);
-  const gTopping = Number(insGroup.run('topping', '配料（可多選）', 1, 3).lastInsertRowid);
-  const gFilling = Number(insGroup.run('filling', '餃子餡料', 0, 4).lastInsertRowid);
   const gFlavorSpicy = Number(insGroup.run('flavor_spicy', '辣度口味', 0, 5).lastInsertRowid);
   const gFlavorStyle = Number(insGroup.run('flavor_style', '風味', 0, 6).lastInsertRowid);
 
-  // 選項項
   const insItem = d.prepare('INSERT INTO option_items (group_id, name, price_diff, is_default, skip_spice, sort_order) VALUES (?, ?, ?, ?, ?, ?)');
   const I = (gid, name, diff, def, skip, order) => insItem.run(gid, name, diff, def ? 1 : 0, skip ? 1 : 0, order);
-  // 麵類：預設 $0，烏冬 +$2
-  const noodles = [['上海麵', 0], ['幼薯粉', 0], ['芽菜底', 0], ['米粉', 0], ['意粉', 0], ['米線', 0], ['出前一丁', 0], ['烏冬', 2]];
-  noodles.forEach(([n, p], i) => I(gNoodle, n, p, i === 0, 0, i + 1));
-  // 辣度：唔辣 ~ 勁辣
-  ['唔辣', '微辣', '少辣', '小辣', '中辣', '大辣', '特辣', '勁辣'].forEach((n, i) => I(gSpice, n, 0, i === 3, 0, i + 1));
-  // 配料：階梯計價 $7/$8/$9/$11
-  const toppings = [
-    ['炸魚蛋', 7], ['魚腐', 7], ['豬皮', 7], ['芽菜', 7],
-    ['墨魚丸', 8], ['蝦丸', 8], ['牛丸', 8], ['豬紅', 8],
-    ['鮮魷', 9], ['牛柏葉', 9], ['豬耳', 9], ['雲腿', 9],
-    ['肥牛', 11], ['鮮牛', 11], ['羊腩', 11], ['雞翼', 11],
-  ];
-  toppings.forEach(([n, p], i) => I(gTopping, n, p, 0, 0, i + 1));
-  // 餃子餡料
-  I(gFilling, '韭菜餃', 0, 1, 0, 1);
-  I(gFilling, '粟米餃', 0, 0, 0, 2);
-  // 小食口味
   ['小辣', '中辣', '大辣'].forEach((n, i) => I(gFlavorSpicy, n, 0, i === 1, 0, i + 1));
   ['滷水', '麻辣', '香辣'].forEach((n, i) => I(gFlavorStyle, n, 0, i === 0, 0, i + 1));
+
+  // 湯底／湯餃：分類選項組（套餐向導）
+  seedCategoryOptionGroups(d, catSoup, DEFAULT_SOUP_OPTION_GROUPS);
+  seedCategoryOptionGroups(d, catDumpling, DEFAULT_DUMPLING_OPTION_GROUPS);
 
   // 商品
   const insCombo = d.prepare(`INSERT INTO products
@@ -492,7 +609,7 @@ function seedNoodleMenuInner(d) {
   const insLink = d.prepare('INSERT INTO product_options (product_id, group_id, step, required) VALUES (?, ?, ?, ?)');
   const L = (pid, gid, step, req) => insLink.run(pid, gid, step, req ? 1 : 0);
 
-  // 湯底套餐（$35）：步驟 2 麵類 → 3 辣度 → 4 配料 → 5 飲品
+  // 湯底套餐（$35）：步驟由分類選項組 + 飲品旗標決定
   const soups = [
     ['雲南酸辣', '🍲', '#dc2626', null],
     ['招牌酸麻辣', '🌶️', '#b91c1c', null],
@@ -502,22 +619,16 @@ function seedNoodleMenuInner(d) {
     ['熱拌', '🥢', '#7c2d12', null],
   ];
   for (const [name, emoji, color, skip] of soups) {
-    const pid = P(catSoup, name, 35, emoji, color, 'combo', skip);
-    L(pid, gNoodle, 2, 1);
-    L(pid, gSpice, 3, 1);
-    L(pid, gTopping, 4, 0);
-    L(pid, null, 5, 0); // 飲品步驟（group_id 由前端標記，見下）
+    P(catSoup, name, 35, emoji, color, 'combo', skip);
   }
 
-  // 湯餃套餐（$45）：步驟 2 餡料 → 3 飲品
+  // 湯餃套餐（$45）
   const dumplings = [['淨湯餃 10 隻', '🥟', '#ca8a04'], ['湯餃上海麵（6 隻）', '🍜', '#b45309']];
   for (const [name, emoji, color] of dumplings) {
-    const pid = P(catDumpling, name, 45, emoji, color, 'combo', null);
-    L(pid, gFilling, 2, 1);
-    L(pid, null, 3, 0);
+    P(catDumpling, name, 45, emoji, color, 'combo', null);
   }
 
-  // 精美小食（部分需口味）
+  // 精美小食（部分需口味 → legacy product_options）
   const snacks = [
     ['麻辣牛柏葉', 35, '🥩', '#b91c1c', gFlavorSpicy],
     ['爽脆豬耳', 35, '🐷', '#db2777', gFlavorStyle],
@@ -544,6 +655,13 @@ function seedNoodleMenuInner(d) {
     VALUES (?, ?, ?, ?, ?, 'simple', 1, 1)`);
   for (const [name, price, emoji, color] of drinks) insDrink.run(catDrink, name, price, emoji, color);
 
+  // 湯底／湯餃分類預設「規格」（POS 於辣度或第一食品步驟顯示）
+  seedCategorySpecs(d, catSoup, DEFAULT_SOUP_SPECS);
+  seedCategorySpecs(d, catDumpling, DEFAULT_DUMPLING_SPECS);
+
+  // 飲品分類預設「口味」規格
+  seedCategorySpecs(d, catDrink, DEFAULT_DRINK_SPECS);
+
   // 時段規則
   const insSlot = d.prepare(`INSERT INTO time_slots (code, name, start_time, end_time, drink_all_free, drink_cold_extra, drink_hot_free)
     VALUES (?, ?, ?, ?, ?, ?, ?)`);
@@ -552,6 +670,181 @@ function seedNoodleMenuInner(d) {
   insSlot.run('dinner', '晚市', '18:00', '23:00', 0, 3, 1);
 
   d.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('menu_v2_seeded', '1');
+}
+
+/** 規格條目：字串 = 名稱（加價 0），或 [name, price_diff] */
+/** 湯底套餐預設規格（與現庫一致） */
+const DEFAULT_SOUP_SPECS = ['走蔥', '走芫茜', '走蔥花', '走蒜', '走油', '打包', ['加麵', 15]];
+/** 湯餃套餐預設規格（與現庫一致；無走油／加麵） */
+const DEFAULT_DUMPLING_SPECS = ['走蔥', '走芫茜', '走蔥花', '走蒜', '打包'];
+/** 預設飲品口味標籤（規格模組；POS 顯示為「口味」） */
+const DEFAULT_DRINK_SPECS = ['走甜', '少甜', '多甜', '走冰', '少冰', '多冰', '加濃', '去冰', '打包'];
+
+/** 湯底分類選項組（與現庫全域 option_groups 一致） */
+const DEFAULT_SOUP_OPTION_GROUPS = [
+  {
+    code: 'noodle', name: '麵類', is_multi: 0, required: 1,
+    items: [
+      ['上海麵', 0, 1], ['幼薯粉', 0, 0], ['芽菜底', 0, 0], ['米粉', 0, 0],
+      ['意粉', 0, 0], ['米線', 0, 0], ['出前一丁', 0, 0], ['烏冬', 2, 0],
+    ],
+  },
+  {
+    code: 'spiciness', name: '辣度', is_multi: 0, required: 1,
+    items: [
+      ['唔辣', 0, 0], ['微辣', 0, 0], ['少辣', 0, 0], ['小辣', 0, 1],
+      ['中辣', 0, 0], ['大辣', 0, 0], ['特辣', 0, 0], ['勁辣', 0, 0],
+    ],
+  },
+  {
+    code: 'topping', name: '配料（可多選）', is_multi: 1, required: 0,
+    items: [
+      ['炸魚蛋', 7], ['魚腐', 7], ['豬皮', 7], ['芽菜', 7],
+      ['墨魚丸', 8], ['蝦丸', 8], ['牛丸', 8], ['豬紅', 8],
+      ['鮮魷', 9], ['牛柏葉', 9], ['豬耳', 9], ['雲腿', 9],
+      ['肥牛', 11], ['鮮牛', 11], ['羊腩', 11], ['雞翼', 11],
+    ],
+  },
+];
+/** 湯餃分類選項組 */
+const DEFAULT_DUMPLING_OPTION_GROUPS = [
+  {
+    code: 'filling', name: '餃子餡料', is_multi: 0, required: 1,
+    items: [['韭菜餃', 0, 1], ['粟米餃', 0, 0]],
+  },
+];
+
+function normalizeSpecSeedEntry(entry) {
+  if (Array.isArray(entry)) {
+    return { name: String(entry[0]), price_diff: Number(entry[1]) || 0 };
+  }
+  if (entry && typeof entry === 'object') {
+    return { name: String(entry.name || ''), price_diff: Number(entry.price_diff) || 0 };
+  }
+  return { name: String(entry), price_diff: 0 };
+}
+
+function seedCategorySpecs(d, categoryId, entries) {
+  const ins = d.prepare(
+    'INSERT INTO category_specs (category_id, name, price_diff, sort_order) VALUES (?, ?, ?, ?)',
+  );
+  entries.forEach((entry, i) => {
+    const { name, price_diff } = normalizeSpecSeedEntry(entry);
+    if (!name) return;
+    ins.run(categoryId, name, price_diff, i + 1);
+  });
+}
+
+function seedCategoryOptionGroups(d, categoryId, groups) {
+  const insG = d.prepare(
+    'INSERT INTO category_option_groups (category_id, code, name, is_multi, required, sort_order) VALUES (?, ?, ?, ?, ?, ?)',
+  );
+  const insI = d.prepare(
+    'INSERT INTO category_option_items (group_id, name, price_diff, is_default, sort_order) VALUES (?, ?, ?, ?, ?)',
+  );
+  groups.forEach((g, gi) => {
+    const gid = Number(insG.run(
+      categoryId, g.code, g.name, g.is_multi ? 1 : 0, g.required ? 1 : 0, gi + 1,
+    ).lastInsertRowid);
+    (g.items || []).forEach((it, ii) => {
+      const name = Array.isArray(it) ? it[0] : it.name;
+      const price_diff = Array.isArray(it) ? (Number(it[1]) || 0) : (Number(it.price_diff) || 0);
+      const is_default = Array.isArray(it) ? (it[2] ? 1 : 0) : (it.is_default ? 1 : 0);
+      insI.run(gid, name, price_diff, is_default, ii + 1);
+    });
+  });
+}
+
+/** 既有庫：把全域 noodle/spiciness/topping/filling 複製到湯底／湯餃分類 */
+function migrateCategoryOptionGroupsFromGlobal(d) {
+  const soup = d.prepare(`
+    SELECT id FROM categories WHERE is_deleted = 0 AND name LIKE '%湯底%' ORDER BY sort_order, id LIMIT 1
+  `).get();
+  const dumpling = d.prepare(`
+    SELECT id FROM categories WHERE is_deleted = 0 AND name LIKE '%湯餃%' ORDER BY sort_order, id LIMIT 1
+  `).get();
+
+  const copyCodes = (categoryId, codes) => {
+    if (!categoryId) return;
+    const existing = d.prepare('SELECT COUNT(*) AS n FROM category_option_groups WHERE category_id = ?').get(categoryId);
+    if (Number(existing?.n) > 0) return;
+    const insG = d.prepare(
+      'INSERT INTO category_option_groups (category_id, code, name, is_multi, required, sort_order) VALUES (?, ?, ?, ?, ?, ?)',
+    );
+    const insI = d.prepare(
+      'INSERT INTO category_option_items (group_id, name, price_diff, is_default, sort_order) VALUES (?, ?, ?, ?, ?)',
+    );
+    let sort = 0;
+    for (const code of codes) {
+      const g = d.prepare('SELECT * FROM option_groups WHERE code = ?').get(code);
+      if (!g) continue;
+      sort += 1;
+      const required = code === 'topping' ? 0 : 1;
+      const gid = Number(insG.run(
+        categoryId, g.code, g.name, Number(g.is_multi) || 0, required, sort,
+      ).lastInsertRowid);
+      const items = d.prepare(
+        'SELECT * FROM option_items WHERE group_id = ? ORDER BY sort_order, id',
+      ).all(g.id);
+      items.forEach((it, i) => {
+        insI.run(gid, it.name, Number(it.price_diff) || 0, Number(it.is_default) || 0, i + 1);
+      });
+    }
+    d.prepare('UPDATE categories SET include_drink_step = 1 WHERE id = ?').run(categoryId);
+  };
+
+  if (soup) copyCodes(soup.id, ['noodle', 'spiciness', 'topping']);
+  else {
+    // 無湯底分類時不補種；有分類但全域缺組時用預設
+  }
+  if (dumpling) copyCodes(dumpling.id, ['filling']);
+
+  // 若分類仍空（無全域組可複製），用預設種子
+  if (soup) {
+    const n = d.prepare('SELECT COUNT(*) AS n FROM category_option_groups WHERE category_id = ?').get(soup.id);
+    if (Number(n?.n) === 0) {
+      seedCategoryOptionGroups(d, soup.id, DEFAULT_SOUP_OPTION_GROUPS);
+      d.prepare('UPDATE categories SET include_drink_step = 1 WHERE id = ?').run(soup.id);
+    }
+  }
+  if (dumpling) {
+    const n = d.prepare('SELECT COUNT(*) AS n FROM category_option_groups WHERE category_id = ?').get(dumpling.id);
+    if (Number(n?.n) === 0) {
+      seedCategoryOptionGroups(d, dumpling.id, DEFAULT_DUMPLING_OPTION_GROUPS);
+      d.prepare('UPDATE categories SET include_drink_step = 1 WHERE id = ?').run(dumpling.id);
+    }
+  }
+}
+
+/** 既有庫：湯底／湯餃分類尚無規格時補種 */
+function seedSoupCategorySpecsIfEmpty(d) {
+  const cats = d.prepare(`
+    SELECT c.id, c.name FROM categories c
+    WHERE c.is_deleted = 0 AND (c.name LIKE '%湯底%' OR c.name LIKE '%湯餃%')
+    ORDER BY c.sort_order, c.id
+  `).all();
+  for (const cat of cats) {
+    const count = d.prepare('SELECT COUNT(*) AS n FROM category_specs WHERE category_id = ?').get(cat.id);
+    if (Number(count?.n) > 0) continue;
+    const list = String(cat.name).includes('湯餃') ? DEFAULT_DUMPLING_SPECS : DEFAULT_SOUP_SPECS;
+    seedCategorySpecs(d, cat.id, list);
+  }
+}
+
+/** 既有庫：找出飲品分類且尚無規格時補種 */
+function seedDrinkCategorySpecsIfEmpty(d) {
+  const drinkCat = d.prepare(`
+    SELECT c.id FROM categories c
+    WHERE c.is_deleted = 0 AND (
+      c.name LIKE '%飲品%'
+      OR EXISTS (SELECT 1 FROM products p WHERE p.category_id = c.id AND p.is_drink = 1)
+    )
+    ORDER BY c.sort_order, c.id LIMIT 1
+  `).get();
+  if (!drinkCat) return;
+  const count = d.prepare('SELECT COUNT(*) AS n FROM category_specs WHERE category_id = ?').get(drinkCat.id);
+  if (Number(count?.n) > 0) return;
+  seedCategorySpecs(d, drinkCat.id, DEFAULT_DRINK_SPECS);
 }
 
 function initDb() {

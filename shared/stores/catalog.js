@@ -24,9 +24,6 @@ export const useCatalogStore = defineStore('catalog', {
     serviceRate: (s) => Number(s.settings.service_fee_rate || 0),
     currency: (s) => s.settings.currency || 'NT$',
     storeName: (s) => s.settings.store_name || '本地 POS',
-    parseSpecs: () => (p) => {
-      try { return p.specs ? JSON.parse(p.specs) : []; } catch { return []; }
-    },
   },
   actions: {
     async loadAll() {

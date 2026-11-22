@@ -35,7 +35,27 @@ export function drinkPrice(base, temperature, slot) {
   return { price: b, label: '原價', free: false };
 }
 
+/** @deprecated 改由分類／菜品 resolved_specs 提供；保留作空清單後備 */
 export const DRINK_PREFS = ['走甜', '少甜', '多甜', '走冰', '少冰', '多冰', '去冰', '加濃', '打包'];
+
+/** preferences / specs 條目正規化（相容舊字串陣列） */
+export function normalizeSpecEntries(list) {
+  if (!Array.isArray(list)) return [];
+  return list.map((p) => {
+    if (p && typeof p === 'object') {
+      return { id: p.id, name: String(p.name || ''), price_diff: Number(p.price_diff) || 0 };
+    }
+    return { name: String(p), price_diff: 0 };
+  }).filter((p) => p.name);
+}
+
+export function specNames(list) {
+  return normalizeSpecEntries(list).map((p) => p.name);
+}
+
+export function specPriceSum(list) {
+  return normalizeSpecEntries(list).reduce((s, p) => s + (p.price_diff || 0), 0);
+}
 
 /** 組合套餐選項的價格加總（不含基礎價與飲品） */
 export function modifiersSum(options) {
@@ -45,5 +65,6 @@ export function modifiersSum(options) {
     if (options[key] && options[key].price_diff) sum += Number(options[key].price_diff) || 0;
   }
   for (const t of options.toppings || []) sum += Number(t.price_diff) || 0;
+  sum += specPriceSum(options.specs);
   return sum;
 }
