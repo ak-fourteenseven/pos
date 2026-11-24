@@ -1,8 +1,14 @@
 node_modules/
 dist/
-server/data/
 *.log
 .DS_Store
+
+# 資料庫：主檔入庫（團隊共享菜單），忽略 WAL/SHM 與備份副本
+server/data/*
+!server/data/pos.db
+server/data/*.db-*
+server/data/pos.db-shm
+server/data/pos.db-wal
 
 # UAT 打包產物（pos.exe 體積大，不入庫）
 pos-uat/
