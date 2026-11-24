@@ -313,7 +313,7 @@ function seed() {
   insertStaff.run('cashier', hashPassword('123456'), '李小收', 'cashier');
   insertStaff.run('cashier2', hashPassword('123456'), '陳小銀', 'cashier');
 
-  const insertPay = d.prepare('INSERT INTO payment_methods (code, name, is_enabled, fee_rate, sort_order) VALUES (?, ?, ?, ?, ?)');
+  const insertPay = d.prepare('INSERT OR IGNORE INTO payment_methods (code, name, is_enabled, fee_rate, sort_order) VALUES (?, ?, ?, ?, ?)');
   insertPay.run('cash', '現金', 1, 0, 1);
   insertPay.run('alipay', '支付寶', 1, 0, 2);
   insertPay.run('octopus', '八達通', 1, 0, 3);
