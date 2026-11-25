@@ -3,12 +3,8 @@ dist/
 *.log
 .DS_Store
 
-# 資料庫：主檔入庫（團隊共享菜單），忽略 WAL/SHM 與備份副本
-server/data/*
-!server/data/pos.db
-server/data/*.db-*
-server/data/pos.db-shm
-server/data/pos.db-wal
+# 資料庫：不入庫（二進位合併易損壞），用遷移腳本管理結構
+server/data/
 
 # UAT 打包產物（pos.exe 體積大，不入庫）
 pos-uat/
