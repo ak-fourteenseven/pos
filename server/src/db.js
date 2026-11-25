@@ -10,6 +10,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
+const OFFICIAL_MENU = require('./official-menu');
 
 /* 資料目錄：
  * - 開發模式：server/data
@@ -276,8 +277,8 @@ CREATE TABLE IF NOT EXISTS product_option_items (
 /* ---------------- 種子資料 ---------------- */
 const DEFAULT_SETTINGS = {
   store_name: '新貴香園',
-  store_address: '香港新界荃灣區享和街51號地下E號舖都城大樓',
-  store_phone: '02-2345-6789',
+  store_address: '荃灣享和街53號郿城大樓地下E號舖',
+  store_phone: '23602231',
   receipt_footer: '謝謝光臨，歡迎再來！',
   service_fee_rate: '0',
   currency: 'HKD$',
@@ -560,6 +561,107 @@ function migrateOrderNoNullable(d) {
 }
 
 /* ---------------- 種子：粉麵餐店菜單（套餐向導 + 飲品時段計價） ---------------- */
+/**
+ * 新貴香園正式菜單：清空既有測試菜單主檔並寫入正式資料。
+ * 保留訂單／營業日／桌台／員工／支付方式；只重建分類、菜品、規格、選項組、時段。
+ * 由 initDb() 以 settings flag 控制只執行一次（見 applyOfficialMenuOnce）。
+ */
+function applyOfficialMenu(d = getDb()) {
+  d.exec('BEGIN');
+  try {
+    // 清空舊菜單主檔（不碰 order_items／orders）
+    d.exec('DELETE FROM category_option_items');
+    d.exec('DELETE FROM category_option_groups');
+    d.exec('DELETE FROM product_option_items');
+    d.exec('DELETE FROM product_option_groups');
+    d.exec('DELETE FROM category_specs');
+    d.exec('DELETE FROM product_specs');
+    d.exec('DELETE FROM time_slots');
+    d.exec('DELETE FROM products');
+    d.exec('DELETE FROM categories');
+
+    // 分類（由 SQLite 自動分配 id，避免與歷史 order_items.product_id 衝突）
+    const insCat = d.prepare('INSERT INTO categories (name, sort_order, include_drink_step, is_deleted) VALUES (?, ?, ?, 0)');
+    const catSoup = Number(insCat.run('湯底套餐', 1, 1).lastInsertRowid);
+    const catDumpling = Number(insCat.run('湯餃套餐', 2, 1).lastInsertRowid);
+    const catSnack = Number(insCat.run('精美小食', 3, 0).lastInsertRowid);
+    const catDrink = Number(insCat.run('飲品（跟餐）', 4, 0).lastInsertRowid);
+
+    const insCombo = d.prepare(`INSERT INTO products
+      (category_id, name, price, emoji, color, kind, skip_group, is_available)
+      VALUES (?, ?, ?, ?, ?, 'combo', ?, 1)`);
+    const insSimple = d.prepare(`INSERT INTO products
+      (category_id, name, price, emoji, color, kind, is_available)
+      VALUES (?, ?, ?, ?, ?, 'simple', 1)`);
+    const insDrinkStmt = d.prepare(`INSERT INTO products
+      (category_id, name, price, emoji, color, kind, is_drink, is_available)
+      VALUES (?, ?, ?, ?, ?, 'simple', 1, 1)`);
+    const insId = (stmt, ...args) => Number(stmt.run(...args).lastInsertRowid);
+
+    // 湯底
+    seedCategoryOptionGroups(d, catSoup, OFFICIAL_MENU.SOUP_OPTION_GROUPS);
+    seedCategorySpecs(d, catSoup, OFFICIAL_MENU.SOUP_SPECS);
+    for (const [name, price, emoji, color, skip] of OFFICIAL_MENU.SOUP_PRODUCTS) {
+      insId(insCombo, catSoup, name, price, emoji, color, skip);
+    }
+
+    // 湯餃
+    seedCategoryOptionGroups(d, catDumpling, OFFICIAL_MENU.DUMPLING_OPTION_GROUPS);
+    seedCategorySpecs(d, catDumpling, OFFICIAL_MENU.DUMPLING_SPECS);
+    for (const [name, price, emoji, color] of OFFICIAL_MENU.DUMPLING_PRODUCTS) {
+      insId(insCombo, catDumpling, name, price, emoji, color, null);
+    }
+
+    // 精美小食
+    for (const [name, price, emoji, color, groupKey, specKey] of OFFICIAL_MENU.SNACK_PRODUCTS) {
+      const id = insId(insSimple, catSnack, name, price, emoji, color);
+      if (groupKey && OFFICIAL_MENU.SNACK_OPTION_GROUPS[groupKey]) {
+        d.prepare('UPDATE products SET use_custom_options = 1 WHERE id = ?').run(id);
+        seedProductOptionGroups(d, id, OFFICIAL_MENU.SNACK_OPTION_GROUPS[groupKey]);
+      }
+      if (specKey && OFFICIAL_MENU.SNACK_SPECS[specKey]) {
+        d.prepare('UPDATE products SET use_custom_specs = 1 WHERE id = ?').run(id);
+        seedProductSpecs(d, id, OFFICIAL_MENU.SNACK_SPECS[specKey]);
+      }
+    }
+
+    // 飲品
+    seedCategorySpecs(d, catDrink, OFFICIAL_MENU.DRINK_SPECS);
+    for (const [name, price, emoji, color] of OFFICIAL_MENU.DRINK_PRODUCTS) {
+      insId(insDrinkStmt, catDrink, name, price, emoji, color);
+    }
+
+    // 時段規則
+    const insSlot = d.prepare(`INSERT INTO time_slots
+      (code, name, start_time, end_time, drink_all_free, drink_cold_extra, drink_hot_free)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`);
+    for (const s of OFFICIAL_MENU.TIME_SLOTS) insSlot.run(...s);
+
+    // 標記已套用正式菜單
+    d.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('menu_official_seeded', '1');
+    d.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('menu_v2_seeded', '1');
+    d.exec('COMMIT');
+  } catch (e) {
+    d.exec('ROLLBACK');
+    throw e;
+  }
+}
+
+/** 以 settings flag 控制正式菜單只套用一次；POS_SEED=force 時可指定 FORCE_MENU=1 強制重灌 */
+function applyOfficialMenuOnce(d = getDb()) {
+  const flag = d.prepare("SELECT value FROM settings WHERE key = 'menu_official_seeded'").get();
+  if (!flag || process.env.FORCE_MENU === '1') applyOfficialMenu(d);
+}
+
+function seedProductSpecs(d, productId, entries) {
+  const ins = d.prepare('INSERT INTO product_specs (product_id, name, price_diff, sort_order) VALUES (?, ?, ?, ?)');
+  entries.forEach((entry, i) => {
+    const { name, price_diff } = normalizeSpecSeedEntry(entry);
+    if (!name) return;
+    ins.run(productId, name, price_diff, i + 1);
+  });
+}
+
 function seedNoodleMenu(d) {
   d.exec('BEGIN');
   try {
@@ -919,6 +1021,10 @@ function initDb() {
   seed();
   const seeded = d.prepare("SELECT value FROM settings WHERE key = 'menu_v2_seeded'").get();
   if (!seeded) seedNoodleMenu(d);
+
+  // 正式菜單：以 menu_official_seeded flag 控制只覆蓋一次
+  // （POS_SEED=force 時可用 FORCE_MENU=1 強制重灌正式菜單）
+  applyOfficialMenuOnce(d);
 }
 
 initDb();

@@ -25,6 +25,9 @@ const selections = ref({}); // groupCode -> { id, name, price_diff } | [{...}]
 const selectedSpecs = ref([]); // [{ id, name, price_diff }]
 const drink = ref(null); // { product_id, name, base_price, temperature, preferences, resolved_specs }
 const qty = ref(1);
+const toppingPage = ref(0); // 分頁（0 起，配料／飲品共用頁碼）
+const TOPPING_PAGE_SIZE = 18; // 配料每頁 18 項
+const DRINK_PAGE_SIZE = 5; // 飲品每頁 5 項
 
 const steps = computed(() => (props.product && props.product.steps) || []);
 const skipCode = computed(() => props.product?.skip_group || null);
@@ -32,6 +35,35 @@ const skipCode = computed(() => props.product?.skip_group || null);
 const visibleSteps = computed(() => steps.value.filter((s) => s.code !== skipCode.value));
 const currentStep = computed(() => visibleSteps.value[stepIdx.value] || null);
 const isLast = computed(() => stepIdx.value >= visibleSteps.value.length - 1);
+
+/** 分頁：配料（topping）與飲品（drink）步驟每頁 18 項，其餘步驟全部顯示 */
+const isTopping = computed(() => currentStep.value?.code === 'topping');
+const isDrinkStep = computed(() => currentStep.value?.code === 'drink');
+const pagedItems = computed(() => {
+  const items = currentStep.value?.items || [];
+  if (!isTopping.value) return items;
+  const start = toppingPage.value * TOPPING_PAGE_SIZE;
+  return items.slice(start, start + TOPPING_PAGE_SIZE);
+});
+const pagedDrinks = computed(() => {
+  const start = toppingPage.value * DRINK_PAGE_SIZE;
+  return (props.drinks || []).slice(start, start + DRINK_PAGE_SIZE);
+});
+// 當前步驟的總頁數（配料用 items，飲品用 drinks）
+const pageCount = computed(() => {
+  const total = isTopping.value
+    ? (currentStep.value.items?.length || 0)
+    : isDrinkStep.value ? (props.drinks?.length || 0) : 0;
+  const size = isTopping.value ? TOPPING_PAGE_SIZE : DRINK_PAGE_SIZE;
+  return total ? Math.max(1, Math.ceil(total / size)) : 1;
+});
+const showPaging = computed(() => (isTopping.value || isDrinkStep.value) && pageCount.value > 1);
+function prevPage() {
+  if (toppingPage.value > 0) toppingPage.value--;
+}
+function nextPage() {
+  if (toppingPage.value < pageCount.value - 1) toppingPage.value++;
+}
 
 /** 菜品生效規格（分類預設或覆寫） */
 const productSpecs = computed(() => normalizeSpecEntries(props.product?.resolved_specs || []));
@@ -50,6 +82,7 @@ watch(() => props.modelValue, (open) => {
   if (!open || !props.product) return;
   stepIdx.value = 0;
   qty.value = 1;
+  toppingPage.value = 0;
   selectedSpecs.value = [];
   const sel = {};
   for (const st of steps.value) {
@@ -161,10 +194,16 @@ const subtotal = computed(() => {
 
 function next() {
   if (isLast.value) confirmAdd();
-  else stepIdx.value++;
+  else {
+    stepIdx.value++;
+    toppingPage.value = 0;
+  }
 }
 function prev() {
-  if (stepIdx.value > 0) stepIdx.value--;
+  if (stepIdx.value > 0) {
+    stepIdx.value--;
+    toppingPage.value = 0;
+  }
 }
 
 function confirmAdd() {
@@ -229,7 +268,7 @@ const stepLabel = computed(() => {
         </div>
         <div class="grid grid-cols-2 sm:grid-cols-3 gap-2">
           <button
-            v-for="item in currentStep.items"
+            v-for="item in pagedItems"
             :key="item.id"
             class="rounded-xl border-2 py-2.5 px-3 text-sm font-bold transition text-left"
             :class="isSelected(currentStep, item) ? 'border-brand-500 bg-brand-50 text-brand-700' : 'border-gray-200 hover:border-gray-300'"
@@ -240,6 +279,12 @@ const stepLabel = computed(() => {
               {{ Number(item.price_diff) > 0 ? '+' : '' }}{{ fmtMoney(item.price_diff, currency) }}
             </span>
           </button>
+        </div>
+        <!-- 配料分頁控制（每頁 18 項） -->
+        <div v-if="showPaging" class="flex items-center justify-between mt-3 pt-3 border-t border-gray-100">
+          <button class="btn-ghost !px-5 !py-2.5 !text-base" :disabled="toppingPage === 0" @click="prevPage">◀ 上一頁</button>
+          <span class="text-sm font-bold text-gray-500">第 {{ toppingPage + 1 }} / {{ pageCount }} 頁</span>
+          <button class="btn-ghost !px-5 !py-2.5 !text-base" :disabled="toppingPage >= pageCount - 1" @click="nextPage">下一頁 ▶</button>
         </div>
 
         <!-- 規格（選填）：辣度同面板 / 無辣度時掛第一個食品步驟 -->
@@ -273,7 +318,7 @@ const stepLabel = computed(() => {
           <span class="chip bg-amber-100 text-amber-700">{{ slotRuleText(slot) }}</span>
         </div>
         <div class="space-y-2">
-          <div v-for="d in drinks" :key="d.id" class="rounded-xl border-2 p-3 transition" :class="drink && drink.product_id === d.id ? 'border-brand-500 bg-brand-50' : 'border-gray-200'">
+          <div v-for="d in pagedDrinks" :key="d.id" class="rounded-xl border-2 p-3 transition" :class="drink && drink.product_id === d.id ? 'border-brand-500 bg-brand-50' : 'border-gray-200'">
             <button class="w-full flex items-center gap-2 text-left" @click="selectDrink(d)">
               <span class="text-xl">{{ d.emoji }}</span>
               <span class="font-bold flex-1">{{ d.name }}</span>
@@ -311,6 +356,12 @@ const stepLabel = computed(() => {
               </div>
             </div>
           </div>
+        </div>
+        <!-- 飲品分頁控制（每頁 18 項） -->
+        <div v-if="showPaging" class="flex items-center justify-between mt-3 pt-3 border-t border-gray-100">
+          <button class="btn-ghost !px-5 !py-2.5 !text-base" :disabled="toppingPage === 0" @click="prevPage">◀ 上一頁</button>
+          <span class="text-sm font-bold text-gray-500">第 {{ toppingPage + 1 }} / {{ pageCount }} 頁</span>
+          <button class="btn-ghost !px-5 !py-2.5 !text-base" :disabled="toppingPage >= pageCount - 1" @click="nextPage">下一頁 ▶</button>
         </div>
         <p class="text-xs text-gray-400 mt-2">不選飲品可直接進入下一步（部分套餐飲品為選填）。</p>
       </div>
