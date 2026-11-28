@@ -95,6 +95,8 @@ POS-dev/
 ├── server/               # 本地服務端（REST API + 送廚/結賬狀態機）
 │   ├── src/db.js         #   SQLite schema + 種子資料（含套餐選項組/時段）
 │   ├── src/index.js      #   REST API + 飲品時段計價引擎
+│   ├── src/print/        #   本機列印（Windows/CUPS；.env 印表機名；HTML→PDF）
+│   ├── .env.example      #   OPEN_DRAWER_PRINTER_NAME / PRINTER_NAME
 │   └── data/pos.db       #   本地資料庫（運行後生成）
 ├── shared/               # 共用層（@shared alias）
 │   ├── api.js            #   API 封裝（自動帶登入身份頭部）

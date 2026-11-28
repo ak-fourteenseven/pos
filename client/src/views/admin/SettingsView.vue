@@ -4,6 +4,7 @@ import { api } from '@shared/api';
 import { useCatalogStore } from '@shared/stores/catalog';
 import { useToastStore } from '@shared/stores/toast';
 import { fmtNum } from '@shared/utils/format';
+import { fetchPrinters, testPrint } from '@shared/utils/print';
 
 const catalog = useCatalogStore();
 const toast = useToastStore();
@@ -23,6 +24,18 @@ const backupDir = ref('');
 const backing = ref(false);
 const info = ref(null);
 const restoring = ref(false);
+const printers = ref([]);
+const printersError = ref('');
+const printersLoading = ref(false);
+const chromePath = ref('');
+const printerEnv = reactive({
+  OPEN_DRAWER_PRINTER_NAME: '',
+  PRINTER_NAME: '',
+});
+const printerPlatform = ref('');
+const testingReal = ref(false);
+const testingFake = ref(false);
+const testResult = ref(null);
 
 onMounted(async () => {
   try {
@@ -38,12 +51,51 @@ onMounted(async () => {
     business_mode: catalog.settings.business_mode || 'table',
   });
   await loadInfo();
+  await loadPrinters();
 });
+
+async function loadPrinters() {
+  printersLoading.value = true;
+  printersError.value = '';
+  try {
+    const data = await fetchPrinters();
+    printers.value = data.printers || [];
+    chromePath.value = data.chromePath || '';
+    printerPlatform.value = data.platform || '';
+    printerEnv.OPEN_DRAWER_PRINTER_NAME = data.env?.OPEN_DRAWER_PRINTER_NAME || '';
+    printerEnv.PRINTER_NAME = data.env?.PRINTER_NAME || '';
+    if (data.error) printersError.value = data.error;
+  } catch (e) {
+    printers.value = [];
+    printersError.value = e.message || '無法取得印表機列表';
+  } finally {
+    printersLoading.value = false;
+  }
+}
 
 async function loadInfo() {
   try {
     info.value = await api.get('/system/info');
   } catch { /* ignore */ }
+}
+
+async function runTestPrint(simulate) {
+  if (simulate) testingFake.value = true;
+  else testingReal.value = true;
+  testResult.value = null;
+  try {
+    const data = await testPrint({ simulate, openDrawer: true });
+    testResult.value = { ok: true, simulate, data };
+    toast.success(simulate
+      ? `模擬成功（PDF ${data.pdfBytes || 0} bytes → ${data.printer}）`
+      : `已送交真實列印（${data.printer}${data.jobId ? ` · ${data.jobId}` : ''}）`);
+  } catch (e) {
+    testResult.value = { ok: false, simulate, message: e.message };
+    toast.error(e.message || (simulate ? '模擬列印失敗' : '真實列印失敗'));
+  } finally {
+    testingReal.value = false;
+    testingFake.value = false;
+  }
 }
 
 async function save() {
@@ -254,11 +306,87 @@ const TABLE_LABELS = {
       </div>
     </div>
 
+    <!-- 印表機（由 server/.env 固定） -->
+    <div class="card p-6 max-w-2xl">
+      <div class="flex items-start justify-between gap-3 mb-1">
+        <h2 class="font-extrabold text-lg">印表機設定</h2>
+        <button type="button" class="btn-ghost btn-sm" :disabled="printersLoading" @click="loadPrinters">
+          {{ printersLoading ? '重新整理中…' : '重新整理列表' }}
+        </button>
+      </div>
+      <p class="text-sm text-gray-500 mb-4">
+        印表機名稱由 <span class="font-mono text-xs">server/.env</span> 設定（生產機為 Windows）。
+        有列印工作時：<span class="font-mono text-xs">OPEN_DRAWER_PRINTER_NAME</span> 會列印並開錢箱；
+        <span class="font-mono text-xs">PRINTER_NAME</span> 只列印。此處僅顯示，請改 env 後重啟服務。
+      </p>
+      <p v-if="printersError" class="text-sm text-amber-600 mb-3">{{ printersError }}</p>
+      <div class="grid sm:grid-cols-1 gap-4">
+        <div>
+          <label class="label">OPEN_DRAWER_PRINTER_NAME（列印 + 開錢箱）</label>
+          <input
+            class="input bg-gray-50"
+            readonly
+            :value="printerEnv.OPEN_DRAWER_PRINTER_NAME || '（未設定）'"
+          />
+        </div>
+        <div>
+          <label class="label">PRINTER_NAME（僅列印）</label>
+          <input
+            class="input bg-gray-50"
+            readonly
+            :value="printerEnv.PRINTER_NAME || '（未設定）'"
+          />
+        </div>
+      </div>
+      <div v-if="printers.length" class="mt-4">
+        <div class="text-xs font-bold text-gray-400 mb-1">本機已安裝印表機（{{ printerPlatform || 'unknown' }}）</div>
+        <ul class="text-sm text-gray-600 space-y-0.5 max-h-36 overflow-y-auto">
+          <li v-for="p in printers" :key="p.name" class="font-mono text-xs">
+            {{ p.name }}<span v-if="p.isDefault" class="text-gray-400">（預設）</span>
+          </li>
+        </ul>
+      </div>
+      <p class="text-xs text-gray-400 mt-3">
+        HTML 轉 PDF 使用本機 Chrome／Edge：
+        <span class="font-mono">{{ chromePath || '未偵測到（請安裝 Chrome 或設定 CHROME_PATH）' }}</span>
+      </p>
+      <div class="flex flex-wrap gap-2 mt-4">
+        <button
+          type="button"
+          class="btn-primary btn-sm"
+          :disabled="testingReal || testingFake"
+          @click="runTestPrint(false)"
+        >
+          {{ testingReal ? '真實測試中…' : '測試列印（真實）' }}
+        </button>
+        <button
+          type="button"
+          class="btn-ghost btn-sm"
+          :disabled="testingReal || testingFake"
+          @click="runTestPrint(true)"
+        >
+          {{ testingFake ? '模擬中…' : '測試列印（模擬成功）' }}
+        </button>
+      </div>
+      <p class="text-xs text-gray-400 mt-2">
+        真實：HTML → PDF → 送交印表機（名稱不正確時會失敗）。
+        模擬：同樣走 HTML → PDF，但不送交 spooler，回傳假裝成功。
+      </p>
+      <pre
+        v-if="testResult"
+        class="mt-3 text-xs font-mono whitespace-pre-wrap break-all rounded-xl p-3 max-h-40 overflow-y-auto"
+        :class="testResult.ok ? 'bg-emerald-50 text-emerald-800' : 'bg-red-50 text-red-700'"
+      >{{ testResult.ok
+        ? JSON.stringify(testResult.data, null, 2)
+        : testResult.message
+      }}</pre>
+    </div>
+
     <!-- 硬體說明 -->
     <div class="card p-6 max-w-2xl">
       <h2 class="font-extrabold text-lg mb-2">硬體設定說明</h2>
       <ul class="text-sm text-gray-500 space-y-1.5 list-disc pl-5">
-        <li>印表機、錢箱、客顯副屏等硬體，需在桌面殼（Tauri/Electron）中透過本地外殼程式呼叫作業系統 API。</li>
+        <li>印表機名稱請寫入 <span class="font-mono text-xs">server/.env</span>，須與 Windows「裝置和印表機」顯示名稱一致。</li>
         <li>本機資料夾即為資料中心：直接複製 <span class="font-mono text-xs">server/data/pos.db</span> 即可完成遷移。</li>
         <li>系統完全離線運作，不依賴任何雲端服務。</li>
       </ul>

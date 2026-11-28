@@ -1,5 +1,9 @@
 <script setup>
+import { ref } from 'vue';
 import Modal from '@shared/components/Modal.vue';
+import { sendPrintJob, wrapReceiptHtml, escapeHtml } from '@shared/utils/print';
+import { useToastStore } from '@shared/stores/toast';
+import { useCatalogStore } from '@shared/stores/catalog';
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -8,15 +12,71 @@ const props = defineProps({
   currency: { type: String, default: 'NT$' },
 });
 const emit = defineEmits(['close', 'update:modelValue']);
+const toast = useToastStore();
+const catalog = useCatalogStore();
+const printing = ref(false);
 
 /** 關閉彈窗：同時通知父層 */
 function onClose() {
   emit('update:modelValue', null);
   emit('close');
 }
-/** 瀏覽器列印（只列印 .print-area 區塊，見 shared/style.css） */
-function print() {
-  window.print();
+
+function buildKitchenHtml(ticket) {
+  const lines = [];
+  lines.push(`<div class="center title">廚房單</div>`);
+  lines.push(`<div class="center muted">${escapeHtml(ticket.order_no || '')}`
+    + (ticket.table_number ? ` · 桌台 ${escapeHtml(ticket.table_number)}` : '')
+    + (ticket.created_at ? ` · ${escapeHtml(ticket.created_at)}` : '')
+    + `</div>`);
+  lines.push(`<div class="center muted">${ticket.appended ? '加菜追加' : '新單'}</div>`);
+  lines.push('<hr class="sep"/>');
+  if (ticket.food?.length) {
+    lines.push('<div class="muted">【後廚】</div>');
+    lines.push(`<pre>${escapeHtml(ticket.food.join('\n'))}</pre>`);
+  }
+  if (ticket.bar?.length) {
+    lines.push('<hr class="sep"/>');
+    lines.push('<div class="muted">【水吧】</div>');
+    lines.push(`<pre>${escapeHtml(ticket.bar.join('\n'))}</pre>`);
+  }
+  if (!ticket.food?.length && !ticket.bar?.length) {
+    lines.push('<div class="center muted">無明細</div>');
+  }
+  return wrapReceiptHtml(lines.join('\n'), { title: '廚房單' });
+}
+
+function hasPrintPrinter() {
+  return !!(catalog.settings.printer_print_only
+    || catalog.settings.printer_kitchen
+    || catalog.settings.printer_receipt
+    || catalog.settings.printers_from_env === '1');
+}
+
+/** 送到 PRINTER_NAME（僅列印）；未設定則瀏覽器列印 */
+async function print() {
+  if (!props.ticket || printing.value) return;
+  if (!hasPrintPrinter()) {
+    window.print();
+    return;
+  }
+  printing.value = true;
+  try {
+    const html = buildKitchenHtml(props.ticket);
+    await sendPrintJob({
+      role: 'kitchen',
+      html,
+      jobName: `kitchen-${props.ticket.order_no || 'ticket'}`,
+      widthMm: 80,
+      openDrawer: false,
+    });
+    toast.success('已送交列印');
+  } catch (e) {
+    toast.error(e.message || '列印失敗，改用瀏覽器列印');
+    window.print();
+  } finally {
+    printing.value = false;
+  }
 }
 </script>
 
@@ -47,13 +107,15 @@ function print() {
       </div>
 
       <p class="text-xs text-gray-400">
-        實際硬體列印需在桌面殼（Tauri/Electron）接入 ESC/POS 印表機；此處為列印內容預覽。
+        按「列印」送到 <span class="font-mono">PRINTER_NAME</span>（僅列印）；未設定或失敗時改開瀏覽器列印。
       </p>
     </div>
 
     <template #footer>
       <button class="btn-ghost" @click="onClose">關閉</button>
-      <button class="btn-primary" @click="print">🖨️ 列印</button>
+      <button class="btn-primary" :disabled="printing" @click="print">
+        {{ printing ? '列印中…' : '🖨️ 列印' }}
+      </button>
     </template>
   </Modal>
 </template>

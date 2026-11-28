@@ -3,6 +3,11 @@ dist/
 *.log
 .DS_Store
 
+# 本機印表機等環境設定（保留 .env.example）
+server/.env
+.env
+.env.local
+
 # 資料庫：不入庫（二進位合併易損壞），用遷移腳本管理結構
 server/data/
 

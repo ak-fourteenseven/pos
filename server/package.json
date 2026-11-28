@@ -10,7 +10,10 @@
   },
   "dependencies": {
     "cors": "^2.8.5",
+    "dotenv": "^18.0.10",
     "express": "^4.21.2",
-    "pos-dev": "file:.."
+    "pos-dev": "file:..",
+    "print-it-now": "^0.4.1",
+    "puppeteer-core": "^24.43.1"
   }
 }

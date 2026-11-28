@@ -2,11 +2,17 @@
  * POS 本地服務端 REST API
  * 所有業務資料存放在本地 SQLite（server/data/pos.db），無雲端依賴。
  */
-const express = require('express');
-const cors = require('cors');
 const path = require('node:path');
 const fs = require('node:fs');
+// 正式啟動也載入 server/.env（dev-entry 會先載一次；重複呼叫無害）
+require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
+
+const express = require('express');
+const cors = require('cors');
 const { getDb, reopenDb, DB_PATH, DATA_DIR, hashPassword, verifyPassword } = require('./db');
+const {
+  listPrinters, printJob, getPrintStatus, getConfiguredPrinters, buildTestReceiptHtml,
+} = require('./print');
 
 const app = express();
 const PORT = Number(process.env.PORT || 3001);
@@ -30,7 +36,18 @@ function managerOnly(req, res, next) {
 /* ---------- 工具 ---------- */
 function getSettings(db) {
   const rows = db.prepare('SELECT key, value FROM settings').all();
-  return Object.fromEntries(rows.map((r) => [r.key, r.value]));
+  const settings = Object.fromEntries(rows.map((r) => [r.key, r.value]));
+  // env 印表機名稱固定覆寫（後台顯示／前端列印判斷）
+  const configured = getConfiguredPrinters();
+  if (configured.fromEnv) {
+    settings.printer_open_drawer = configured.open_drawer;
+    settings.printer_print_only = configured.print_only;
+    settings.printer_receipt = configured.receipt;
+    settings.printer_kitchen = configured.kitchen;
+    settings.printer_bar = configured.bar;
+    settings.printers_from_env = '1';
+  }
+  return settings;
 }
 /** 外賣桌區 → 固定支付方式（結賬時覆寫） */
 function paymentForTableArea(area) {
@@ -1480,6 +1497,72 @@ app.put('/api/settings', managerOnly, (req, res) => {
     if (req.body && req.body[k] != null) upsert.run(k, String(req.body[k]));
   }
   ok(res, getSettings(db));
+});
+
+/* ================= 本機列印（Windows / CUPS：依 .env 印表機名稱） ================= */
+app.get('/api/printers', async (req, res) => {
+  try {
+    const status = await getPrintStatus();
+    ok(res, status);
+  } catch (e) {
+    fail(res, e.message || '無法取得印表機列表', 500);
+  }
+});
+
+app.post('/api/print', async (req, res) => {
+  try {
+    const body = req.body || {};
+    if (!body.html && body.text == null && !body.openDrawer) {
+      return fail(res, '請提供 html、text，或 openDrawer');
+    }
+    if (body.role && !['receipt', 'kitchen', 'bar'].includes(body.role)) {
+      return fail(res, 'role 須為 receipt / kitchen / bar');
+    }
+    const result = await printJob({
+      printer: body.printer,
+      role: body.role,
+      openDrawer: !!body.openDrawer,
+      simulate: !!body.simulate,
+      html: body.html,
+      text: body.text,
+      jobName: body.jobName,
+      copies: body.copies,
+      widthMm: body.widthMm,
+    });
+    ok(res, result);
+  } catch (e) {
+    fail(res, e.message || '列印失敗', 500);
+  }
+});
+
+/** 測試列印：HTML→PDF→送交（simulate=true 時假裝成功、不碰真實印表機） */
+app.post('/api/print/test', managerOnly, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const simulate = !!body.simulate;
+    const openDrawer = body.openDrawer !== false; // 預設走開錢箱機路徑
+    const result = await printJob({
+      role: 'receipt',
+      openDrawer,
+      simulate,
+      html: buildTestReceiptHtml(),
+      jobName: simulate ? 'POS-test-simulate' : 'POS-test-real',
+      widthMm: 80,
+    });
+    ok(res, result);
+  } catch (e) {
+    fail(res, e.message || '測試列印失敗', 500);
+  }
+});
+
+/** 僅列出名稱（輕量） */
+app.get('/api/printers/names', async (req, res) => {
+  try {
+    const printers = await listPrinters();
+    ok(res, printers);
+  } catch (e) {
+    fail(res, e.message || '無法列出印表機', 500);
+  }
 });
 
 /* ================= 營業日（開市 / 日結） ================= */

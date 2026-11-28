@@ -16,6 +16,7 @@ import {
   fmtMoney, hexA, PAYMENT_META, QUICK_REMARKS, isPlatformPayment, paymentForTableArea,
 } from '@shared/utils/format';
 import { currentSlot, modifiersSum, slotRuleText, specNames } from '@shared/utils/pricing';
+import { sendPrintJob, wrapReceiptHtml, escapeHtml } from '@shared/utils/print';
 
 const auth = useAuthStore();
 const catalog = useCatalogStore();
@@ -535,7 +536,50 @@ async function confirmCashPay() {
   openCheckoutPreview();
 }
 
-/** 確認結賬：真正收款後回桌台視圖 */
+/** 組顧客收銀單 HTML（結賬列印用） */
+function buildCustomerReceiptHtml() {
+  const cur = catalog.currency;
+  const itemBlocks = pos.items.map((it) => {
+    const lines = optionLines(it).map((l) => `<div class="muted">${escapeHtml(l)}</div>`).join('');
+    const saving = drinkSaving(it);
+    const saveLine = saving
+      ? `<div class="muted">飲品時段優惠：原價 ${escapeHtml(fmtMoney(saving.base, cur))}，優惠 −${escapeHtml(fmtMoney(saving.saved, cur))}</div>`
+      : '';
+    return `<div style="margin:6px 0">
+      <div class="row"><span class="grow">${escapeHtml(it.name)}${it.spec ? `[${escapeHtml(it.spec)}]` : ''} ×${it.qty}</span>
+      <span>${escapeHtml(fmtMoney(it.price * it.qty, cur))}</span></div>
+      ${lines}${saveLine}
+    </div>`;
+  }).join('');
+
+  const parts = [
+    `<div class="center title">${escapeHtml(catalog.settings.store_name || '')}</div>`,
+    `<div class="center muted">${escapeHtml(pos.orderNo || '')}</div>`,
+    pos.tableNumber
+      ? `<div class="center muted">桌台 ${escapeHtml(pos.tableNumber)}${pos.guestCount > 0 ? ` · ${pos.guestCount}人` : ''}</div>`
+      : '',
+    '<hr class="sep"/>',
+    itemBlocks,
+    '<hr class="sep"/>',
+    `<div class="row"><span>小計</span><span>${escapeHtml(fmtMoney(pos.subtotal, cur))}</span></div>`,
+  ];
+  if (pos.discount) {
+    parts.push(`<div class="row"><span>折扣</span><span>−${escapeHtml(fmtMoney(pos.discount, cur))}</span></div>`);
+  }
+  if (pos.serviceFee) {
+    parts.push(`<div class="row"><span>服務費</span><span>${escapeHtml(fmtMoney(pos.serviceFee, cur))}</span></div>`);
+  }
+  parts.push(`<div class="row total"><span>實收</span><span>${escapeHtml(fmtMoney(pos.total, cur))}</span></div>`);
+  parts.push(`<div class="row"><span>支付方式</span><span>${escapeHtml(paymentMeta(pos.paymentMethod).label || pos.paymentMethod)}</span></div>`);
+  if (pos.paymentMethod === 'cash') {
+    parts.push(`<div class="row"><span>收現 / 找零</span><span>${escapeHtml(fmtMoney(pos.received, cur))} / ${escapeHtml(fmtMoney(pos.change, cur))}</span></div>`);
+  }
+  parts.push('<hr class="sep"/>');
+  parts.push(`<div class="center muted">${escapeHtml(catalog.settings.receipt_footer || '')}</div>`);
+  return wrapReceiptHtml(parts.filter(Boolean).join('\n'), { title: '顧客收銀單' });
+}
+
+/** 確認結賬：真正收款後送印收銀單（現金 → 開錢箱機），再回桌台視圖 */
 async function confirmCheckout() {
   if (!pos.items.length) {
     toast.error('購物車為空');
@@ -551,7 +595,33 @@ async function confirmCheckout() {
   }
   checkingOut.value = true;
   try {
+    const canPrint = catalog.settings.printers_from_env === '1'
+      || catalog.settings.printer_open_drawer
+      || catalog.settings.printer_print_only
+      || catalog.settings.printer_receipt;
+    const openDrawer = pos.paymentMethod === 'cash';
+    const receiptHtml = canPrint ? buildCustomerReceiptHtml() : null;
+    const receiptJobName = `receipt-${pos.orderNo || Date.now()}`;
     await pos.checkout();
+    if (receiptHtml) {
+      try {
+        await sendPrintJob({
+          role: 'receipt',
+          openDrawer,
+          html: receiptHtml,
+          jobName: receiptJobName,
+          widthMm: 80,
+        });
+      } catch (pe) {
+        toast.error(`結賬完成，但列印失敗：${pe.message}`);
+        checkoutPreview.value = false;
+        receivedDigits.value = '';
+        cashPayModal.value = false;
+        await catalog.reloadTables();
+        router.push('/tables');
+        return;
+      }
+    }
     checkoutPreview.value = false;
     receivedDigits.value = '';
     cashPayModal.value = false;
